@@ -53,11 +53,15 @@ static void set_blocking(int fd, int blocking) {
     fcntl(fd, F_SETFL, blocking ? (flags & ~O_NONBLOCK) : (flags | O_NONBLOCK));
 }
 
-static void drop(gnet_loop *l, size_t i) {
-    close(l->conns[i].fd);
+static void remove_at(gnet_loop *l, size_t i) {
     free(l->conns[i].buf);
     l->conns[i] = l->conns[--l->count];
     if (l->next > l->count) l->next = 0;
+}
+
+static void drop(gnet_loop *l, size_t i) {
+    close(l->conns[i].fd);
+    remove_at(l, i);
 }
 
 /* Value of a Content-Length header inside head[0..len): -1 when absent,
@@ -131,6 +135,18 @@ void gnet_loop_close(uint64_t h, int32_t fd) {
     gnet_loop *l = (gnet_loop *)(uintptr_t)h;
     for (size_t i = 0; i < l->count; i++)
         if (l->conns[i].fd == fd) { drop(l, i); return; }
+}
+
+/* Unlike close, leaves the fd open for the caller; whatever the client sent after the
+   request already handed out goes to rest. */
+void gnet_loop_detach(uint64_t h, int32_t fd, gs_rref rest) {
+    gnet_loop *l = (gnet_loop *)(uintptr_t)h;
+    for (size_t i = 0; i < l->count; i++)
+        if (l->conns[i].fd == fd) {
+            if (l->conns[i].len) gs_bld_append(rest, l->conns[i].buf, l->conns[i].len);
+            remove_at(l, i);
+            return;
+        }
 }
 
 /* Returns 1 and a request, or an EV_ code for a request to reject (the caller answers and closes). */

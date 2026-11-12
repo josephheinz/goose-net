@@ -42,6 +42,7 @@ fn format(out: u8[>..]&, m: Method) { out.append(name(m)); }
 
 // The status codes this library names. Any other code is Other { code }.
 enum Status {
+    SwitchingProtocols,
     Ok, Created, Accepted, NoContent,
     MovedPermanently, Found, SeeOther, NotModified, TemporaryRedirect, PermanentRedirect,
     BadRequest, Unauthorized, Forbidden, NotFound, MethodNotAllowed, RequestTimeout,
@@ -52,6 +53,7 @@ enum Status {
 
 fn code(s: Status) -> i64 {
     match s {
+        SwitchingProtocols => 101,
         Ok => 200, Created => 201, Accepted => 202, NoContent => 204,
         MovedPermanently => 301, Found => 302, SeeOther => 303, NotModified => 304,
         TemporaryRedirect => 307, PermanentRedirect => 308,
@@ -65,6 +67,7 @@ fn code(s: Status) -> i64 {
 
 fn reason(s: Status) -> const u8[:] {
     match s {
+        SwitchingProtocols => "Switching Protocols",
         Ok => "OK", Created => "Created", Accepted => "Accepted", NoContent => "No Content",
         MovedPermanently => "Moved Permanently", Found => "Found", SeeOther => "See Other",
         NotModified => "Not Modified", TemporaryRedirect => "Temporary Redirect",
@@ -82,6 +85,7 @@ fn reason(s: Status) -> const u8[:] {
 
 fn status_from_code(c: i64) -> Status {
     match c {
+        101 => Status.SwitchingProtocols,
         200 => Status.Ok, 201 => Status.Created, 202 => Status.Accepted, 204 => Status.NoContent,
         301 => Status.MovedPermanently, 302 => Status.Found, 303 => Status.SeeOther,
         304 => Status.NotModified, 307 => Status.TemporaryRedirect, 308 => Status.PermanentRedirect,
@@ -239,6 +243,35 @@ fn header(req: const Request&, name: const u8[:]) -> const u8[:], bool {
     return find_header(req.head, name);
 }
 
+// True when Accept-Encoding allows coding: an explicit entry decides, otherwise "*" does, and q=0
+// refuses. A request without the header accepts only the identity encoding.
+fn accepts(req: const Request&, coding: const u8[:]) -> bool {
+    let value, has = find_header(req.head, "accept-encoding");
+    if !has { return false; }
+    each_split(value, ',') { item =>
+        let token, params, has_params = split_once(item, ';');
+        if eq_nocase(trim(token), coding) { return !q_is_zero(params); }
+    };
+    each_split(value, ',') { item =>
+        let token, params, has_params = split_once(item, ';');
+        if trim(token) == "*" { return !q_is_zero(params); }
+    };
+    return false;
+}
+
+// True when a parameter list such as " q=0.0" sets a weight of zero.
+fn q_is_zero(params: const u8[:]) -> bool {
+    each_split(params, ';') { param =>
+        let p = trim(param);
+        if p.len >= 3 && lower(p[0]) == 'q' && p[1] == '=' {
+            var zero = true;
+            for c in trim(p[2..]) { if c != '0' && c != '.' { zero = false; } }
+            return zero;
+        }
+    };
+    return false;
+}
+
 // The raw (still URL encoded) value of a query parameter.
 fn query_param(req: const Request&, name: const u8[:]) -> const u8[:], bool {
     each_split(req.query, '&') { pair =>
@@ -338,6 +371,61 @@ fn send_response_with(conn: net::Socket, res: const Response&, body: const u8[:]
     else { head.append("Connection: close\r\n\r\n"); }
     if !has || head_only { return conn.send(head); }
     return conn.send(head, body);
+}
+
+// Writes the status line, res.headers and "Connection: <connection>" with no Content-Type or
+// Content-Length, for a 101 or any reply whose body is framed some other way.
+fn send_head(conn: net::Socket, res: const Response&, connection: const u8[:]) -> bool {
+    var head: u8[>..] = [];
+    format(head, "HTTP/1.1 ", res.status, "\r\n");
+    head.append(res.headers);
+    format(head, "Connection: ", connection, "\r\n\r\n");
+    return conn.send(head);
+}
+
+// HTTP/1.0 clients do not understand chunked framing.
+fn supports_chunked(req: const Request&) -> bool { req.version != "HTTP/1.0" }
+
+// Starts a streamed reply and ignores res.body. chunked = true sends Transfer-Encoding: chunked;
+// false (an HTTP/1.0 request, see supports_chunked) sends no length and Connection: close, and the
+// body is raw bytes ended by closing the connection. Pass the same chunked to send_chunk and
+// end_chunked.
+fn begin_chunked(conn: net::Socket, res: const Response&, head_only: bool = false, keep_alive: bool = false,
+                 chunked: bool = true) -> bool {
+    var head: u8[>..] = [];
+    format(head, "HTTP/1.1 ", res.status, "\r\nContent-Type: ", res.content_type, "\r\n");
+    if chunked { head.append("Transfer-Encoding: chunked\r\n"); }
+    head.append(res.headers);
+    if chunked && keep_alive { head.append("Connection: keep-alive\r\n\r\n"); }
+    else { head.append("Connection: close\r\n\r\n"); }
+    return conn.send(head);
+}
+
+// One chunk: hex size, CRLF, data, CRLF. Empty data appends nothing, since a zero-size chunk ends the body.
+fn format_chunk(out: u8[>..]&, data: const u8[:]) {
+    if data.len == 0 { return; }
+    let digits: const u8[:] = "0123456789abcdef";
+    var size: u8[..16] = "";
+    var n = data.len;
+    while n > 0 { size.push(digits[n % 16]); n /= 16; }
+    for i in size.len { out.push(size[size.len - 1 - i]); }
+    out.append("\r\n");
+    out.append(data);
+    out.append("\r\n");
+}
+
+fn send_chunk(conn: net::Socket, data: const u8[:], chunked: bool = true) -> bool {
+    if data.len == 0 { return true; }
+    if !chunked { return conn.send(data); }
+    var out: u8[>..] = [];
+    format_chunk(out, data);
+    return conn.send(out);
+}
+
+// Writes the terminating zero chunk; nothing to write when the reply was not chunked.
+fn end_chunked(conn: net::Socket, chunked: bool = true) -> bool {
+    if !chunked { return true; }
+    return conn.send("0\r\n\r\n");
 }
 
 // Accepts connections forever, calling F(req: const Request&, res: Response&) on this thread, one request at a time.

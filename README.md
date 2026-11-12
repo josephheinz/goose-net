@@ -89,7 +89,7 @@ The slices are views into the request buffer.
 
 ```goose
 enum Method { Get, Head, Post, Put, Patch, Delete, Options, Other }
-enum Status { Ok, Created, Accepted, NoContent, MovedPermanently, Found, NotModified,
+enum Status { SwitchingProtocols, Ok, Created, Accepted, NoContent, MovedPermanently, Found, NotModified,
               BadRequest, Unauthorized, Forbidden, NotFound, MethodNotAllowed, RequestTimeout,
               Conflict, PayloadTooLarge, UnprocessableEntity, HeaderFieldsTooLarge,
               InternalServerError, NotImplemented, ServiceUnavailable, Other { code: i64 } }
@@ -118,7 +118,21 @@ A variant literal has its own variant type, so give it the enum type before you 
 | `json_reply(res, status)` | Set the JSON content type. Write the JSON into `res.body`. |
 | `json_error(res, status, msg)` | Reply with `{"error": msg}`. |
 | `set_header(res, name, value)` | Add a response header. |
+| `accepts(req, coding)` | Whether `Accept-Encoding` allows `coding` (`"gzip"`): explicit entry first, then `*`, and `q=0` refuses. False without the header. |
 | `add_header(res, name, value)` | `set_header` with checks: false, with `res` unchanged, when the line does not fit or holds a bad byte. Call it once per line for a repeated header such as `Set-Cookie`. |
+
+### Streaming replies
+
+| Function | What it does |
+|---|---|
+| `begin_chunked(conn, res, head_only = false, keep_alive = false, chunked = true)` | Send the head of a streamed reply (`Transfer-Encoding: chunked`, no length). `res.body` is ignored. |
+| `send_chunk(conn, data, chunked = true)`, `end_chunked(conn, chunked = true)` | Send one chunk, then the final `0` chunk. Empty `data` sends nothing. |
+| `format_chunk(out&, data)` | Append one chunk to a buffer. |
+| `supports_chunked(req)` | False for HTTP/1.0. Pass it as `chunked`: the reply then has no framing and `Connection: close`, and closing the socket ends the body. |
+| `send_head(conn, res, connection)` | Status line, `res.headers` and `Connection: <connection>`, with no body headers. For a `101`. |
+
+`net::detach(lp, conn, rest&)` takes a connection out of the loop without closing it and appends the bytes the client sent after the request to `rest`.
+Take the head and the tail from a handler that needs the socket for itself, as an upgrade does.
 
 `serve(server, log = true, timeout_ms = 5000, limit = 1 MB, keep_alive = true)` runs your block on one thread, one request at a time.
 A poll loop keeps every connection open, so keep-alive clients send many requests on one connection, and pipelined requests are answered in order.

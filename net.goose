@@ -102,6 +102,7 @@ enum Event {
 extern fn c_loop_new(listen_fd: i32, idle_ms: i64, max_request: i64, accept_max: i64) -> u64 = "gnet_loop_new";
 extern fn c_loop_next(h: u64, out: u8[>..]&, fd: i32&) -> i32 = "gnet_loop_next";
 extern fn c_loop_close(h: u64, fd: i32) = "gnet_loop_close";
+extern fn c_loop_detach(h: u64, fd: i32, rest: u8[>..]&) = "gnet_loop_detach";
 extern fn c_loop_free(h: u64) = "gnet_loop_free";
 extern fn c_loop_count(h: u64) -> i32 = "gnet_loop_count";
 
@@ -129,6 +130,11 @@ fn next(l: Loop, out: u8[>..]&) -> Socket, Event {
 }
 
 fn close_connection(l: Loop, conn: Socket) { c_loop_close(l.handle, conn.fd); }
+
+// Takes conn out of the loop without closing it, for a protocol upgrade or a long-lived stream, and
+// appends to rest any bytes the client sent after the request next returned (a WebSocket client may
+// send its first frame at once). The caller owns the socket from here on.
+fn detach(l: Loop, conn: Socket, rest: u8[>..]&) { c_loop_detach(l.handle, conn.fd, rest); }
 
 fn open_connections(l: Loop) -> i64 { c_loop_count(l.handle) }
 

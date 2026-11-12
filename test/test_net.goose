@@ -78,6 +78,42 @@ thread_fn chunked_worker(server: net::Socket) {
     }
 }
 
+// Replies to /chunked with a chunked body, to /raw as an HTTP/1.0 stream, and to /upgrade with a 101.
+thread_fn stream_worker(server: net::Socket) {
+    let lp = net::connection_loop(server, 5000);
+    var raw: u8[>..] = [];
+    loop {
+        raw.clear();
+        let conn, ev = lp.next(raw);
+        if ev != net::Event.Request { lp.close_connection(conn); continue; }
+        let req, outcome = http::parse_request(raw);
+        var res = http::new_response();
+        if req.path == "/chunked" {
+            let chunked = http::supports_chunked(req);
+            http::begin_chunked(conn, res, req.method == http::Method.Head, false, chunked);
+            http::send_chunk(conn, "hello", chunked);
+            http::send_chunk(conn, "", chunked);
+            http::send_chunk(conn, ", goose", chunked);
+            http::end_chunked(conn, chunked);
+            lp.close_connection(conn);
+        } else if req.path == "/upgrade" {
+            res.status = http::Status.SwitchingProtocols;
+            http::set_header(res, "Upgrade", "test");
+            http::send_head(conn, res, "Upgrade");
+            lp.close_connection(conn);
+        } else if req.path == "/detach" {
+            var rest: u8[>..] = [];
+            lp.detach(conn, rest);
+            var reply: u8[>..] = [];
+            format(reply, "open=", lp.open_connections(), " rest=", rest);
+            conn.send(reply);
+            conn.close();
+        } else {
+            lp.close_connection(conn);
+        }
+    }
+}
+
 // Reads until n whole responses (head plus Content-Length body) are in out.
 fn read_responses(conn: net::Socket, n: i64, out: u8[>..]&) -> bool {
     var pos = 0;
@@ -207,11 +243,15 @@ fn enum_tests() {
     check(!http::has_body(http::Status.NotModified), "304 has no body");
 
     // Every named status survives code -> status_from_code.
+    check(http::code(http::Status.SwitchingProtocols) == 101, "code 101");
+    check_eq(str(http::Status.SwitchingProtocols), "101 Switching Protocols", "status format 101");
+    check(http::has_body(http::Status.SwitchingProtocols) == false, "101 has no body");
     check(http::code(http::Status.PermanentRedirect) == 308, "code 308");
     check_eq(http::reason(http::Status.SeeOther), "See Other", "reason 303");
     let named = [http::Status.Ok, http::Status.Accepted, http::Status.Found, http::Status.Conflict,
                  http::Status.SeeOther, http::Status.TemporaryRedirect, http::Status.PermanentRedirect,
-                 http::Status.HeaderFieldsTooLarge, http::Status.ServiceUnavailable];
+                 http::Status.HeaderFieldsTooLarge, http::Status.ServiceUnavailable,
+                 http::Status.SwitchingProtocols];
     for s in named { check(http::status_from_code(http::code(s)) == s, "status round trip"); }
 }
 
@@ -276,6 +316,58 @@ fn cookie_wire_test(port: i64) {
     let second = find(r, "Set-Cookie: y=2; Path=/\r\n");
     check(first >= 0 && second > first, "cookie wire: both lines, in order");
     c.close();
+}
+
+// One http::accepts lookup on a request with the given head lines.
+fn accepts_check(head: const u8[:], coding: const u8[:], want: bool, what: const u8[:]) {
+    var raw: u8[..512] = "";
+    format(raw, "GET / HTTP/1.1\r\n", head, "\r\n\r\n");
+    let req, outcome = http::parse_request(raw);
+    check(http::accepts(req, coding) == want, what);
+}
+
+fn accepts_tests() {
+    accepts_check("Accept-Encoding: gzip", "gzip", true, "accepts: gzip");
+    accepts_check("Accept-Encoding: gzip, deflate", "gzip", true, "accepts: in a list");
+    accepts_check("Accept-Encoding: gzip;q=0", "gzip", false, "accepts: q=0 refuses");
+    accepts_check("Accept-Encoding: gzip;q=0.0", "gzip", false, "accepts: q=0.0 refuses");
+    accepts_check("Accept-Encoding: gzip; q=0.001", "gzip", true, "accepts: small q accepts");
+    accepts_check("Accept-Encoding: *", "gzip", true, "accepts: star matches");
+    accepts_check("Accept-Encoding: *;q=0", "gzip", false, "accepts: star with q=0");
+    accepts_check("Accept-Encoding: gzip;q=0, *", "gzip", false, "accepts: explicit refusal beats star");
+    accepts_check("Accept-Encoding: br, gzip;q=0.5", "gzip", true, "accepts: weighted entry");
+    accepts_check("Accept-Encoding: br, gzip;q=0.5", "br", true, "accepts: other coding");
+    accepts_check("Accept-Encoding: br, deflate", "gzip", false, "accepts: not listed");
+    accepts_check("Accept-Encoding: identity", "gzip", false, "accepts: identity only");
+    accepts_check("Host: x", "gzip", false, "accepts: header absent");
+    accepts_check("Accept-Encoding: GZIP", "gzip", true, "accepts: coding is case-insensitive");
+    accepts_check("accept-encoding:  Gzip ;Q=0", "gzip", false, "accepts: Q and spaces");
+    accepts_check("Accept-Encoding: x-gzip", "gzip", false, "accepts: no partial match");
+}
+
+fn chunk_format_tests() {
+    var out: u8[>..] = [];
+    http::format_chunk(out, "hello");
+    check_eq(out, "5\r\nhello\r\n", "format_chunk: small");
+    out.clear();
+    http::format_chunk(out, "");
+    check(out.len == 0, "format_chunk: empty appends nothing");
+    var big: u8[>..] = [];
+    for i in 255 { big.push('x'); }
+    out.clear();
+    http::format_chunk(out, big);
+    check(starts_with(out, "ff\r\nxxx") && out.len == 2 + 2 + 255 + 2, "format_chunk: hex size ff");
+    big.push('x');
+    out.clear();
+    http::format_chunk(out, big);
+    check(starts_with(out, "100\r\n"), "format_chunk: hex size 100");
+    out.clear();
+    http::format_chunk(out, "a");
+    http::format_chunk(out, "bc");
+    var body: u8[>..] = [];
+    out.append("0\r\n\r\n");
+    check(http::decode_chunked(out, body), "format_chunk: decode_chunked reads it back");
+    check_eq(body, "abc", "format_chunk: round trip");
 }
 
 fn unit_tests() {
@@ -403,10 +495,73 @@ fn http_tests(base: const u8[:], chunked_url: const u8[:]) {
     check(http::last_error().len > 0, "client error message");
 }
 
+fn stream_tests(port: i64) {
+    var out: u8[>..] = [];
+    let s, ok = http::get(str("http://127.0.0.1:", port, "/chunked"), out);
+    check_status(s, ok, http::Status.Ok, "chunked reply");
+    check_eq(out, "hello, goose", "chunked reply decoded by the client");
+
+    // The raw head, to see the framing.
+    let a = net::connect("127.0.0.1", port);
+    a.set_timeout(3000);
+    var ra: u8[>..] = [];
+    check(a.send("GET /chunked HTTP/1.1\r\nHost: x\r\n\r\n") && a.recv_all(ra), "chunked wire: response");
+    check(find(ra, "Transfer-Encoding: chunked\r\n") >= 0, "chunked wire: header");
+    check(find(ra, "Content-Length") < 0, "chunked wire: no Content-Length");
+    check(find(ra, "\r\n\r\n5\r\nhello\r\n7\r\n, goose\r\n0\r\n\r\n") >= 0, "chunked wire: chunks, empty one skipped");
+    a.close();
+
+    // HTTP/1.0: no framing, the close ends the body.
+    let b = net::connect("127.0.0.1", port);
+    b.set_timeout(3000);
+    var rb: u8[>..] = [];
+    check(b.send("GET /chunked HTTP/1.0\r\n\r\n") && b.recv_all(rb), "HTTP/1.0 stream: response");
+    check(find(rb, "Transfer-Encoding") < 0 && find(rb, "Connection: close\r\n") >= 0, "HTTP/1.0 stream: no chunked header");
+    check(ends_with(rb, "\r\n\r\nhello, goose"), "HTTP/1.0 stream: raw body");
+    b.close();
+
+    // HEAD gets the head and no body.
+    let h = net::connect("127.0.0.1", port);
+    h.set_timeout(3000);
+    var rh: u8[>..] = [];
+    check(h.send("HEAD /chunked HTTP/1.1\r\n\r\n") && h.recv_all(rh), "HEAD stream: response");
+    check(find(rh, "hello") < 0, "HEAD stream: no body");
+    h.close();
+
+    // send_head writes no body headers.
+    let u = net::connect("127.0.0.1", port);
+    u.set_timeout(3000);
+    var ru: u8[>..] = [];
+    check(u.send("GET /upgrade HTTP/1.1\r\n\r\n") && u.recv_all(ru), "send_head: response");
+    check_eq(ru, "HTTP/1.1 101 Switching Protocols\r\nUpgrade: test\r\nConnection: Upgrade\r\n\r\n", "send_head: exact bytes");
+    u.close();
+}
+
+fn detach_test(port: i64) {
+    // The bytes sent after the request land in rest, and the connection is out of the loop but open.
+    let c = net::connect("127.0.0.1", port);
+    c.set_timeout(3000);
+    check(c.send("GET /detach HTTP/1.1\r\nHost: x\r\n\r\nfirst-frame"), "detach: send");
+    var r: u8[>..] = [];
+    check(c.recv_all(r), "detach: reply");
+    check_eq(r, "open=0 rest=first-frame", "detach: rest and loop count");
+    c.close();
+
+    // Nothing after the request: rest stays empty.
+    let d = net::connect("127.0.0.1", port);
+    d.set_timeout(3000);
+    var rd: u8[>..] = [];
+    check(d.send("GET /detach HTTP/1.1\r\n\r\n") && d.recv_all(rd), "detach: bare request");
+    check_eq(rd, "open=0 rest=", "detach: empty rest");
+    d.close();
+}
+
 fn main() {
     enum_tests();
     unit_tests();
     cookie_tests();
+    accepts_tests();
+    chunk_format_tests();
     tcp_tests();
 
     let server = net::listen(0, "127.0.0.1");
@@ -416,10 +571,14 @@ fn main() {
     let raw_server = net::listen(0, "127.0.0.1");
     thread_spawn(http_worker, server);
     thread_spawn(chunked_worker, raw_server);
+    let stream_server = net::listen(0, "127.0.0.1");
+    thread_spawn(stream_worker, stream_server);
 
     http_tests(str("http://127.0.0.1:", port), str("http://127.0.0.1:", raw_server.local_port(), "/"));
     keep_alive_tests(port);
     cookie_wire_test(port);
+    stream_tests(stream_server.local_port());
+    detach_test(stream_server.local_port());
 
     print(checks - failures, "/", checks, " checks passed");
     if failures > 0 { exit(1); }
