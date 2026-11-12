@@ -1,0 +1,5 @@
+test/test_net
+examples/echo
+examples/hello_http
+*.o
+*.dSYM/

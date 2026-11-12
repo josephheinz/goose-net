@@ -8,8 +8,8 @@ POSIX only (macOS and Linux). The native part is `src/net.c`, which `goose` comp
 In your program's root file:
 
 ```goose
-import net from "../goose-net";   // a path, or a git source: "you/goose-net@v1"
-import net.http;                  // only if you want HTTP
+import net from "jheinz-bzs/goose-net@v0.1.0";   // or a path to a checkout
+import net.http;                                 // only if you want HTTP
 ```
 
 ### TCP: `net`
@@ -143,6 +143,8 @@ http::request(http::Method.Patch, url, payload, body, "application/json", 10000)
 The client decodes `Content-Length` and chunked bodies. It speaks plain `http://` only.
 
 ## Examples and tests
+
+Run these from the repository root.
 
 ```bash
 goose build examples/echo.goose && examples/echo 9000
