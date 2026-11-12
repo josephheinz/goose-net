@@ -367,6 +367,7 @@ fn serve<F>(server: net::Socket, log: bool = true, timeout_ms: i64 = 5000, limit
                 if !sent || !keep { lp.close_connection(conn); }
             },
             Failed => {},
+            Stopped => { lp.free(); return; },
             _ => {
                 let status = match ev {
                     TooLarge => Status.PayloadTooLarge,

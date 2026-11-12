@@ -3,6 +3,7 @@
 ## v0.3.0 (unreleased)
 
 - `net.lifecycle`: `stop_on_signals`, `request_stop`, `stop_phase`, `stopping`, `draining`, `wait_stop`, `listen_inherited`, `enable_handoff` and `ready`. Graceful stop on SIGTERM and SIGINT, systemd socket activation, `sd_notify`, and a zero-downtime restart on SIGUSR2.
+- `Loop.next` drains when the process stops: it closes idle connections, finishes requests already under way, then returns the new `Event.Stopped`. `http::serve` returns on it.
 - `test/c/run.sh`: C tests for the native code.
 
 ## v0.2.1

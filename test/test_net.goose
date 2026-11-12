@@ -3,6 +3,7 @@
 
 import net from "..";
 import net.http;
+import net.lifecycle;
 import std;
 
 var failures = 0;
@@ -403,6 +404,39 @@ fn http_tests(base: const u8[:], chunked_url: const u8[:]) {
     check(http::last_error().len > 0, "client error message");
 }
 
+// A server that stops when the process does.
+thread_fn stop_worker(server: net::Socket) {
+    http::serve(server, false) { req, res => http::text(res, http::Status.Ok, "up"); };
+}
+
+// The stop is one-way for the process, so this runs last.
+fn stop_tests() {
+    check(!net::stopping() && !net::draining() && net::stop_phase() == 0, "not stopping before a stop");
+    check(!net::wait_stop(10), "wait_stop times out while running");
+
+    let server = net::listen(0, "127.0.0.1");
+    let port = server.local_port();
+    thread_spawn(stop_worker, server);
+
+    let a = net::connect("127.0.0.1", port);
+    a.set_timeout(3000);
+    var ra: u8[>..] = [];
+    check(a.send("GET / HTTP/1.1\r\nHost: x\r\n\r\n") && read_responses(a, 1, ra), "serve answers before a stop");
+
+    net::stop_on_signals(0, 1000);
+    net::request_stop();
+    check(net::wait_stop(1000), "wait_stop sees the stop");
+    check(net::stopping(), "stopping after request_stop");
+    check(closed_by_peer(a), "serve closes an idle connection when draining");
+    check(net::draining() && net::stop_phase() == 2, "draining once the idle connection is closed");
+
+    let b = net::connect("127.0.0.1", port);
+    b.set_timeout(500);
+    var rb: u8[>..] = [];
+    check(b.send("GET / HTTP/1.1\r\nHost: x\r\n\r\n") && !read_responses(b, 1, rb), "no new connection is served while draining");
+    check(rb.len == 0, "and nothing is written to it");
+}
+
 fn main() {
     enum_tests();
     unit_tests();
@@ -420,6 +454,7 @@ fn main() {
     http_tests(str("http://127.0.0.1:", port), str("http://127.0.0.1:", raw_server.local_port(), "/"));
     keep_alive_tests(port);
     cookie_wire_test(port);
+    stop_tests();
 
     print(checks - failures, "/", checks, " checks passed");
     if failures > 0 { exit(1); }

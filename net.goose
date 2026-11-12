@@ -96,7 +96,8 @@ enum Event {
     HeadTooLarge,   // its head is over 64 KB
     Unsupported,    // a chunked request body
     BadLength,
-    Failed
+    Failed,
+    Stopped         // the process is stopping and this loop has drained: close it and return
 }
 
 extern fn c_loop_new(listen_fd: i32, idle_ms: i64, max_request: i64, accept_max: i64) -> u64 = "gnet_loop_new";
@@ -123,6 +124,7 @@ fn next(l: Loop, out: u8[>..]&) -> Socket, Event {
         3 => Event.HeadTooLarge,
         4 => Event.Unsupported,
         5 => Event.BadLength,
+        6 => Event.Stopped,
         _ => Event.Failed,
     };
     return Socket { fd: fd }, event;

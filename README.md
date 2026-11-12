@@ -60,7 +60,7 @@ loop {
 }
 ```
 
-`net::Event` is `Request`, `TooLarge`, `HeadTooLarge`, `Unsupported` (a chunked body), `BadLength` or `Failed`.
+`net::Event` is `Request`, `TooLarge`, `HeadTooLarge`, `Unsupported` (a chunked body), `BadLength`, `Failed` or `Stopped` (the process is stopping and the loop has drained: see Lifecycle).
 The loop makes the listening socket non-blocking.
 
 ### Lifecycle: `net.lifecycle`
@@ -87,6 +87,7 @@ net::ready();
 Phase 1 lasts `delay_ms`, so a load balancer can stop routing. In phase 2 loops stop accepting and close idle
 connections, and `Loop.next` returns `Event.Stopped` once no connection is left or `drain_ms` has passed.
 The process exits after `delay_ms + drain_ms + 5000` ms whatever the loops do.
+`http::serve` returns on `Stopped`.
 The C test suite is `test/c/run.sh`.
 
 ### HTTP server: `http`
