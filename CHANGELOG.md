@@ -10,6 +10,7 @@
 - `net::Hub` (`import net.hub`): `hub`, `add`, `send`, `publish`, `close`, `count` and `next` for chunked streams and WebSockets on one poll thread, with `HubKind` and `HubEvent`. C core in `src/hub_core.c`, glue in `src/hub.c`.
 - `http::websocket_accept(key)` computes `Sec-WebSocket-Accept`.
 - `examples/ws_echo.goose`.
+- Opt-in spool mode for the connection loop: `set_uploads` sends multipart bodies over a threshold to a file (`Event.Spooled`, `spool_path`), with a separate size limit. Off unless called.
 
 ## v0.2.1
 

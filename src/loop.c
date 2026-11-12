@@ -5,6 +5,7 @@
 #include "goose.h"
 
 #include <stdint.h>
+#include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
 #include <strings.h>
@@ -14,21 +15,30 @@
 #include <poll.h>
 #include <time.h>
 #include <sys/socket.h>
+#include <sys/stat.h>
 #include <sys/time.h>
 #include <netinet/in.h>
 #include <netinet/tcp.h>
 
 /* What gnet_loop_next found. The Goose side mirrors these in net::Event. */
 enum { EV_FAILED = -1, EV_REQUEST = 1, EV_TOO_LARGE = 2, EV_HEAD_TOO_LARGE = 3,
-       EV_UNSUPPORTED = 4, EV_BAD_LENGTH = 5 };
+       EV_UNSUPPORTED = 4, EV_BAD_LENGTH = 5, EV_SPOOLED = 6, EV_SPOOL_FAILED = 7 };
 
 #define MAX_HEAD 65536
+#define PATH_MAX_ 320
+
+typedef struct { const uint8_t *data; int64_t len; } gnet_bytes;
 
 typedef struct {
     int fd;
     uint8_t *buf;
     size_t len, cap;
     int64_t last_ms;
+    int spfd;                   /* spool file, -1 when the body is not spooled */
+    char *spath;
+    size_t hlen;                /* spooling: head bytes (through \r\n\r\n) at the start of buf */
+    int64_t remain;             /* spooling: body bytes still to come */
+    int failed;                 /* spooling: a write failed */
 } gnet_conn;
 
 typedef struct {
@@ -40,6 +50,10 @@ typedef struct {
     size_t count, cap, next;    /* next: where the round robin resumes */
     struct pollfd *pfds;
     size_t pfd_cap;
+    int64_t max_upload, spool_over;   /* set_uploads; max_upload 0 = off */
+    char dir[256];
+    uint64_t spool_n;
+    char last_path[PATH_MAX_];        /* the file of the last EV_SPOOLED */
 } gnet_loop;
 
 static int64_t now_ms(void) {
@@ -53,7 +67,17 @@ static void set_blocking(int fd, int blocking) {
     fcntl(fd, F_SETFL, blocking ? (flags & ~O_NONBLOCK) : (flags | O_NONBLOCK));
 }
 
+static void spool_discard(gnet_conn *c) {
+    if (c->spfd < 0) return;
+    close(c->spfd);
+    unlink(c->spath);
+    free(c->spath);
+    c->spfd = -1;
+    c->spath = NULL;
+}
+
 static void remove_at(gnet_loop *l, size_t i) {
+    spool_discard(&l->conns[i]);
     free(l->conns[i].buf);
     l->conns[i] = l->conns[--l->count];
     if (l->next > l->count) l->next = 0;
@@ -65,10 +89,12 @@ static void drop(gnet_loop *l, size_t i) {
 }
 
 /* Value of a Content-Length header inside head[0..len): -1 when absent,
-   -2 when malformed. Sets *chunked for Transfer-Encoding: chunked. */
-static int64_t scan_head(const uint8_t *head, size_t len, int *chunked) {
+   -2 when malformed. Sets *chunked for Transfer-Encoding: chunked and
+   *multi for Content-Type: multipart/form-data. */
+static int64_t scan_head(const uint8_t *head, size_t len, int *chunked, int *multi) {
     int64_t length = -1;
     *chunked = 0;
+    *multi = 0;
     size_t i = 0;
     while (i < len) {
         const uint8_t *eol = memchr(head + i, '\n', len - i);
@@ -85,6 +111,10 @@ static int64_t scan_head(const uint8_t *head, size_t len, int *chunked) {
             while (j < n && (line[j] == ' ' || line[j] == '\t' || line[j] == '\r')) j++;
             if (!digits || j != n) return -2;
             length = v;
+        } else if (n >= 13 && strncasecmp(line, "content-type:", 13) == 0) {
+            size_t j = 13;
+            while (j < n && (line[j] == ' ' || line[j] == '\t')) j++;
+            if (n - j >= 19 && strncasecmp(line + j, "multipart/form-data", 19) == 0) *multi = 1;
         } else if (n >= 18 && strncasecmp(line, "transfer-encoding:", 18) == 0) {
             for (size_t j = 18; j + 7 <= n; j++)
                 if (strncasecmp(line + j, "chunked", 7) == 0) { *chunked = 1; break; }
@@ -94,19 +124,54 @@ static int64_t scan_head(const uint8_t *head, size_t len, int *chunked) {
     return length;
 }
 
+/* Writes all of p; 0 on failure. */
+static int write_all(int fd, const uint8_t *p, size_t n) {
+    while (n > 0) {
+        ssize_t w = write(fd, p, n);
+        if (w < 0 && errno == EINTR) continue;
+        if (w <= 0) return 0;
+        p += w; n -= (size_t)w;
+    }
+    return 1;
+}
+
+/* Starts spooling c's body (head is the head's size without the blank line, length the body size):
+   the buffered body bytes go to a new file and the rest of the buffer is kept. 0 on failure. */
+static int begin_spool(gnet_loop *l, gnet_conn *c, size_t head, int64_t length) {
+    char *path = malloc(PATH_MAX_);
+    if (!path) return 0;
+    snprintf(path, PATH_MAX_, "%s/gnet-%d-%llu", l->dir, (int)getpid(), (unsigned long long)l->spool_n++);
+    int fd = open(path, O_CREAT | O_EXCL | O_WRONLY, 0600);
+    if (fd < 0) { free(path); return 0; }
+    size_t hlen = head + 4, have = c->len - hlen;
+    size_t take = have < (uint64_t)length ? have : (size_t)length;
+    if (!write_all(fd, c->buf + hlen, take)) { close(fd); unlink(path); free(path); return 0; }
+    memmove(c->buf + hlen, c->buf + hlen + take, have - take);
+    c->len -= take;
+    c->spfd = fd; c->spath = path; c->hlen = hlen;
+    c->remain = length - (int64_t)take;
+    return 1;
+}
+
 /* How much of the buffer is one whole request: > 0 its size, 0 more is
-   needed, < 0 an EV_ code for a request that cannot be served. */
-static int64_t frame(const gnet_loop *l, const gnet_conn *c) {
+   needed (also while a body spools), < 0 an EV_ code for a request that
+   cannot be served. */
+static int64_t frame(gnet_loop *l, gnet_conn *c) {
     if (c->len < 4) return 0;
     const uint8_t *end = memmem(c->buf, c->len, "\r\n\r\n", 4);
     if (!end) return c->len > MAX_HEAD ? -EV_HEAD_TOO_LARGE : 0;
     size_t head = (size_t)(end - c->buf);
-    int chunked;
-    int64_t length = scan_head(c->buf, head, &chunked);
+    int chunked, multi;
+    int64_t length = scan_head(c->buf, head, &chunked, &multi);
     if (chunked) return -EV_UNSUPPORTED;
     if (length == -2) return -EV_BAD_LENGTH;
     if (length < 0) length = 0;
-    if (length > l->max_request) return -EV_TOO_LARGE;
+    int64_t limit = multi && l->max_upload > 0 ? l->max_upload : l->max_request;
+    if (length > limit) return -EV_TOO_LARGE;
+    if (multi && l->max_upload > 0 && length > l->spool_over) {
+        if (!begin_spool(l, c, head, length)) return -EV_SPOOL_FAILED;
+        return 0;
+    }
     int64_t total = (int64_t)head + 4 + length;
     return (int64_t)c->len >= total ? total : 0;
 }
@@ -118,6 +183,7 @@ uint64_t gnet_loop_new(int32_t listen_fd, int64_t idle_ms, int64_t max_request, 
     l->idle_ms = idle_ms;
     l->max_request = max_request;
     l->accept_max = accept_max;
+    l->max_upload = 0;
     set_blocking(listen_fd, 0);
     return (uint64_t)(uintptr_t)l;
 }
@@ -129,6 +195,28 @@ void gnet_loop_free(uint64_t h) {
     free(l->conns);
     free(l->pfds);
     free(l);
+}
+
+/* Turns on spooling: multipart bodies up to max_upload, those over spool_over to files in dir.
+   0 when dir is not a writable directory. */
+int32_t gnet_loop_set_uploads(uint64_t h, int64_t max_upload, int64_t spool_over, gnet_bytes dir) {
+    gnet_loop *l = (gnet_loop *)(uintptr_t)h;
+    struct stat st;
+    if (max_upload <= 0 || dir.len <= 0 || dir.len >= (int64_t)sizeof l->dir) return 0;
+    char d[sizeof l->dir];
+    memcpy(d, dir.data, (size_t)dir.len);
+    d[dir.len] = 0;
+    if (stat(d, &st) < 0 || !S_ISDIR(st.st_mode) || access(d, W_OK | X_OK) < 0) return 0;
+    memcpy(l->dir, d, (size_t)dir.len + 1);
+    l->max_upload = max_upload;
+    l->spool_over = spool_over;
+    return 1;
+}
+
+/* Appends the path of the file of the last EV_SPOOLED. */
+void gnet_loop_spool_path(uint64_t h, gs_rref out) {
+    gnet_loop *l = (gnet_loop *)(uintptr_t)h;
+    gs_bld_append(out, l->last_path, strlen(l->last_path));
 }
 
 void gnet_loop_close(uint64_t h, int32_t fd) {
@@ -154,7 +242,22 @@ static int take_ready(gnet_loop *l, gs_rref out, int32_t *fd_out) {
     for (size_t k = 0; k < l->count; k++) {
         size_t i = (l->next + k) % l->count;
         gnet_conn *c = &l->conns[i];
-        int64_t n = frame(l, c);
+        int64_t n = c->spfd < 0 ? frame(l, c) : 0;
+        if (c->spfd >= 0 && (c->failed || c->remain == 0)) {
+            l->next = (i + 1) % l->count;
+            *fd_out = c->fd;
+            if (c->failed) { spool_discard(c); c->failed = 0; return EV_SPOOL_FAILED; }
+            /* body complete: hand out the head, keep what follows it, give the file away */
+            gs_bld_append(out, c->buf, c->hlen);
+            memmove(c->buf, c->buf + c->hlen, c->len - c->hlen);
+            c->len -= c->hlen;
+            snprintf(l->last_path, sizeof l->last_path, "%s", c->spath);
+            close(c->spfd);
+            free(c->spath);
+            c->spfd = -1;
+            c->spath = NULL;
+            return EV_SPOOLED;
+        }
         if (n == 0) continue;
         l->next = (i + 1) % l->count;
         *fd_out = c->fd;
@@ -186,7 +289,7 @@ static void accept_all(gnet_loop *l) {
             l->conns = grown;
             l->cap = cap;
         }
-        l->conns[l->count++] = (gnet_conn){ fd, NULL, 0, 0, now_ms() };
+        l->conns[l->count++] = (gnet_conn){ .fd = fd, .last_ms = now_ms(), .spfd = -1 };
     }
 }
 
@@ -200,7 +303,18 @@ static int fill(gnet_conn *c) {
         c->buf = grown;
         c->cap = cap;
     }
+    if (c->failed) return 1;
     ssize_t n = recv(c->fd, c->buf + c->len, c->cap - c->len, MSG_DONTWAIT);
+    if (n > 0 && c->spfd >= 0 && c->remain > 0) {
+        /* body bytes go to the file; any bytes after the body stay in the buffer */
+        size_t take = (uint64_t)n < (uint64_t)c->remain ? (size_t)n : (size_t)c->remain;
+        if (!write_all(c->spfd, c->buf + c->len, take)) c->failed = 1;
+        memmove(c->buf + c->len, c->buf + c->len + take, (size_t)n - take);
+        c->len += (size_t)n - take;
+        c->remain -= (int64_t)take;
+        c->last_ms = now_ms();
+        return 1;
+    }
     if (n > 0) { c->len += (size_t)n; c->last_ms = now_ms(); return 1; }
     if (n < 0 && (errno == EAGAIN || errno == EWOULDBLOCK || errno == EINTR)) return 1;
     return 0;
