@@ -51,6 +51,11 @@ thread_fn http_worker(server: net::Socket) {
             http::json_reply(res, http::Status.Created);
             res.body.append("{\"ok\":true}");
             http::set_header(res, "Location", "/created/1");
+        } else if req.path == "/cookie" {
+            let v, has = http::cookie(req, "a");
+            res.body.append(v);
+            http::add_header(res, "Set-Cookie", "x=1; Path=/");
+            http::add_header(res, "Set-Cookie", "y=2; Path=/");
         } else if req.path == "/empty" {
             res.status = http::Status.NoContent;
         } else if req.path == "/teapot" {
@@ -210,6 +215,69 @@ fn enum_tests() {
     for s in named { check(http::status_from_code(http::code(s)) == s, "status round trip"); }
 }
 
+// One http::cookie lookup on a request with the given head lines.
+fn cookie_check(head: const u8[:], name: const u8[:], want: const u8[:], want_has: bool, what: const u8[:]) {
+    var raw: u8[..512] = "";
+    format(raw, "GET / HTTP/1.1\r\n", head, "\r\n\r\n");
+    let req, outcome = http::parse_request(raw);
+    let v, has = http::cookie(req, name);
+    check(has == want_has, str(what, ": presence"));
+    check_eq(v, want, str(what, ": value"));
+}
+
+fn cookie_tests() {
+    cookie_check("Cookie: a=1; b=2", "b", "2", true, "cookie: second pair");
+    cookie_check("Cookie: a=1; a=2", "a", "1", true, "cookie: first duplicate wins");
+    cookie_check("Cookie:   a =  1  ;  b=2 ", "a", "1", true, "cookie: whitespace trimmed");
+    cookie_check("Cookie: a=\"x y\"", "a", "x y", true, "cookie: quotes removed");
+    cookie_check("Cookie: junk; a=1", "a", "1", true, "cookie: pair without = skipped");
+    cookie_check("Cookie: junk; a=1", "junk", "", false, "cookie: pair without = is absent");
+    cookie_check("Cookie: =x; a=1", "", "", false, "cookie: empty name never matches");
+    cookie_check("Cookie: Theme=dark", "theme", "", false, "cookie: case-sensitive");
+    cookie_check("Cookie: a=; b=2", "a", "", true, "cookie: empty value is present");
+    cookie_check("Cookie: a=1\r\nCookie: b=2", "b", "", false, "cookie: second Cookie header ignored");
+    cookie_check("Cookie: a=1\r\nCookie: b=2", "a", "1", true, "cookie: first Cookie header read");
+    cookie_check("Host: x", "a", "", false, "cookie: no Cookie header");
+    cookie_check("Cookie: a=b=c", "a", "b=c", true, "cookie: value splits at the first =");
+
+    var res = http::new_response();
+    check(http::add_header(res, "Set-Cookie", "a=1"), "add_header: normal line");
+    check_eq(res.headers, "Set-Cookie: a=1\r\n", "add_header: line bytes");
+    check(http::add_header(res, "Set-Cookie", "b=2"), "add_header: repeated name");
+    check_eq(res.headers, "Set-Cookie: a=1\r\nSet-Cookie: b=2\r\n", "add_header: two lines");
+
+    var full = http::new_response();
+    var filler: u8[..4000] = "";
+    for i in 0..4000 { filler.push('x'); }
+    full.headers.append(filler);
+    check(!http::add_header(full, "Set-Cookie", "a=1; Path=/; Max-Age=31536000; HttpOnly; SameSite=Lax; Secure; Domain=example.com; padding=aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"), "add_header: refuses a line that does not fit");
+    check(full.headers.len == 4000, "add_header: unchanged after the refusal");
+
+    var bad = http::new_response();
+    check(!http::add_header(bad, "X", "a\rb"), "add_header: refuses CR");
+    check(!http::add_header(bad, "X", "a\nb"), "add_header: refuses LF");
+    check(!http::add_header(bad, "X", "a\0b"), "add_header: refuses NUL");
+    check(!http::add_header(bad, "", "v"), "add_header: refuses an empty name");
+    check(!http::add_header(bad, "X:Y", "v"), "add_header: refuses ':' in the name");
+    check(!http::add_header(bad, "X Y", "v"), "add_header: refuses a space in the name");
+    check(bad.headers.len == 0, "add_header: unchanged after every refusal");
+}
+
+fn cookie_wire_test(port: i64) {
+    let c = net::connect("127.0.0.1", port, 2000);
+    check(c.ok(), "cookie wire: connect");
+    var r: u8[>..] = [];
+    check(c.send("GET /cookie HTTP/1.1\r\nHost: x\r\nCookie: a=1; b=2\r\nConnection: close\r\n\r\n") && read_responses(c, 1, r), "cookie wire: response");
+    let he = find(r, "\r\n\r\n");
+    check(he >= 0, "cookie wire: head found");
+    check_eq(r[he + 4..], "1", "cookie wire: body is the cookie value");
+    check(count_of(r, "Set-Cookie:") == 2, "cookie wire: exactly two Set-Cookie lines");
+    let first = find(r, "Set-Cookie: x=1; Path=/\r\n");
+    let second = find(r, "Set-Cookie: y=2; Path=/\r\n");
+    check(first >= 0 && second > first, "cookie wire: both lines, in order");
+    c.close();
+}
+
 fn unit_tests() {
     let host, port, target, ok = http::parse_url("http://example.com:8080/a/b?c=1");
     check(ok, "parse_url ok");
@@ -338,6 +406,7 @@ fn http_tests(base: const u8[:], chunked_url: const u8[:]) {
 fn main() {
     enum_tests();
     unit_tests();
+    cookie_tests();
     tcp_tests();
 
     let server = net::listen(0, "127.0.0.1");
@@ -350,6 +419,7 @@ fn main() {
 
     http_tests(str("http://127.0.0.1:", port), str("http://127.0.0.1:", raw_server.local_port(), "/"));
     keep_alive_tests(port);
+    cookie_wire_test(port);
 
     print(checks - failures, "/", checks, " checks passed");
     if failures > 0 { exit(1); }

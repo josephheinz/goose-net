@@ -112,11 +112,13 @@ A variant literal has its own variant type, so give it the enum type before you 
 |---|---|
 | `header(req, name)` | A request header, case-insensitive. |
 | `query_param(req, name)` | A raw query value. Decode it with `url_decode(out&, s)`. |
+| `cookie(req, name)` | A raw request cookie value, as a view into the request, and whether it was there. The first pair with that name wins; the first `Cookie` header is read. |
 | `path_param(path, prefix)` | `path_param("/todos/42", "/todos/")` gives `"42"`. |
 | `text(res, status, s)` | A plain text reply. |
 | `json_reply(res, status)` | Set the JSON content type. Write the JSON into `res.body`. |
 | `json_error(res, status, msg)` | Reply with `{"error": msg}`. |
 | `set_header(res, name, value)` | Add a response header. |
+| `add_header(res, name, value)` | `set_header` with checks: false, with `res` unchanged, when the line does not fit or holds a bad byte. Call it once per line for a repeated header such as `Set-Cookie`. |
 
 `serve(server, log = true, timeout_ms = 5000, limit = 1 MB, keep_alive = true)` runs your block on one thread, one request at a time.
 A poll loop keeps every connection open, so keep-alive clients send many requests on one connection, and pipelined requests are answered in order.

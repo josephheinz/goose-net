@@ -273,6 +273,24 @@ fn query_param(req: const Request&, name: const u8[:]) -> const u8[:], bool {
     return "", false;
 }
 
+// The raw value of the request cookie called name (RFC 6265 section 5.4): a
+// view into the Cookie header, with one pair of surrounding double quotes
+// removed. Names match exactly. The first pair with that name wins, a pair
+// without '=' is skipped, and only the first Cookie header is read.
+fn cookie(req: const Request&, name: const u8[:]) -> const u8[:], bool {
+    let line, has = find_header(req.head, "cookie");
+    if !has || name.len == 0 { return "", false; }
+    each_split(line, ';') { pair =>
+        let key, value, eq = split_once(pair, '=');
+        if eq && trim(key) == name {
+            let v = trim(value);
+            if v.len >= 2 && v[0] == '"' && v[v.len - 1] == '"' { return v[1..v.len - 1], true; }
+            return v, true;
+        }
+    };
+    return "", false;
+}
+
 // When path is prefix followed by one more segment, that segment:
 // path_param("/todos/42", "/todos/") is "42", true.
 fn path_param(path: const u8[:], prefix: const u8[:]) -> const u8[:], bool {
@@ -292,6 +310,19 @@ fn new_response() -> Response {
 // Adds a response header line.
 fn set_header(res: Response&, name: const u8[:], value: const u8[:]) {
     format(res.headers, name, ": ", value, "\r\n");
+}
+
+// Adds a response header line after checking it: false, with res unchanged,
+// when the line does not fit in res.headers (set_header would abort), when
+// name is empty or holds a control byte, a space or ':', or when value holds
+// CR, LF or NUL. Call it once per line for a header that repeats, such as
+// Set-Cookie.
+fn add_header(res: Response&, name: const u8[:], value: const u8[:]) -> bool {
+    if name.len == 0 || name.len + value.len + 4 > res.headers.cap - res.headers.len { return false; }
+    for c in name { if c <= ' ' || c == ':' || c >= 127 { return false; } }
+    for c in value { if c == '\r' || c == '\n' || c == 0 { return false; } }
+    format(res.headers, name, ": ", value, "\r\n");
+    return true;
 }
 
 // A plain text reply.
