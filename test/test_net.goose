@@ -91,11 +91,14 @@ thread_fn stream_worker(server: net::Socket) {
         var res = http::new_response();
         if req.path == "/chunked" {
             let chunked = http::supports_chunked(req);
-            http::begin_chunked(conn, res, req.method == http::Method.Head, false, chunked);
-            http::send_chunk(conn, "hello", chunked);
-            http::send_chunk(conn, "", chunked);
-            http::send_chunk(conn, ", goose", chunked);
-            http::end_chunked(conn, chunked);
+            let head_only = req.method == http::Method.Head;
+            http::begin_chunked(conn, res, head_only, false, chunked);
+            if !head_only {
+                http::send_chunk(conn, "hello", chunked);
+                http::send_chunk(conn, "", chunked);
+                http::send_chunk(conn, ", goose", chunked);
+                http::end_chunked(conn, chunked);
+            }
             lp.close_connection(conn);
         } else if req.path == "/upgrade" {
             res.status = http::Status.SwitchingProtocols;
