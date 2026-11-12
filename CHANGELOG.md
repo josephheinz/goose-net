@@ -1,5 +1,9 @@
 # Changelog
 
+## Unreleased
+
+Opt-in spool mode for the connection loop: `set_uploads` sends multipart bodies over a threshold to a file (`Event.Spooled`, `spool_path`), with a separate size limit. Off unless called.
+
 ## v0.2.1
 
 No code change. Tagged with goose-web v0.2.1, which pins one tag for all three packages.

@@ -96,7 +96,9 @@ enum Event {
     HeadTooLarge,   // its head is over 64 KB
     Unsupported,    // a chunked request body
     BadLength,
-    Failed
+    Failed,
+    Spooled,        // set_uploads only: out holds the head through its blank line; the body is in spool_path
+    SpoolFailed     // set_uploads only: the spool file could not be written; answer 500 and close
 }
 
 extern fn c_loop_new(listen_fd: i32, idle_ms: i64, max_request: i64, accept_max: i64) -> u64 = "gnet_loop_new";
@@ -104,6 +106,8 @@ extern fn c_loop_next(h: u64, out: u8[>..]&, fd: i32&) -> i32 = "gnet_loop_next"
 extern fn c_loop_close(h: u64, fd: i32) = "gnet_loop_close";
 extern fn c_loop_free(h: u64) = "gnet_loop_free";
 extern fn c_loop_count(h: u64) -> i32 = "gnet_loop_count";
+extern fn c_loop_set_uploads(h: u64, max_upload: i64, spool_over: i64, dir: const u8[:]) -> i32 = "gnet_loop_set_uploads";
+extern fn c_loop_spool_path(h: u64, out: u8[>..]&) = "gnet_loop_spool_path";
 
 // Connections idle for idle_ms are closed; 0 keeps them open. accept_max caps the connections taken per
 // wake (0 = all waiting); with several loops on one listening socket, 1 spreads a burst across them.
@@ -123,10 +127,21 @@ fn next(l: Loop, out: u8[>..]&) -> Socket, Event {
         3 => Event.HeadTooLarge,
         4 => Event.Unsupported,
         5 => Event.BadLength,
+        6 => Event.Spooled,
+        7 => Event.SpoolFailed,
         _ => Event.Failed,
     };
     return Socket { fd: fd }, event;
 }
+
+// Opt in to spooling. Multipart bodies may be up to max_upload bytes; one over spool_over bytes is written to a
+// new file in dir as it arrives and handed over as Event.Spooled. False when dir is not a writable directory.
+fn set_uploads(l: Loop, max_upload: i64, spool_over: i64, dir: const u8[:]) -> bool {
+    c_loop_set_uploads(l.handle, max_upload, spool_over, dir) != 0
+}
+
+// Appends the file of the last Event.Spooled. The caller owns it from then on and must delete it.
+fn spool_path(l: Loop, out: u8[>..]&) { c_loop_spool_path(l.handle, out); }
 
 fn close_connection(l: Loop, conn: Socket) { c_loop_close(l.handle, conn.fd); }
 
