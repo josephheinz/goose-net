@@ -1,5 +1,9 @@
 # Changelog
 
+## v0.2.1
+
+No code change. Tagged with goose-web v0.2.1, which pins one tag for all three packages.
+
 ## v0.2.0
 
 No code change. Tagged with goose-web v0.2.0, which pins one tag for all three packages.
