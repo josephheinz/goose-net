@@ -1,12 +1,6 @@
-/* The connection loop behind net::Loop: one thread watches a listening
-   socket and every open connection with poll(), buffers what arrives, and
-   hands back one complete HTTP/1.x request at a time (head plus a
-   Content-Length body). Connections stay open between requests, which is
-   what keep-alive needs, and pipelined requests wait in their buffer.
-
-   Ready connections are served round robin, so no client can starve the
-   others. Responses are written by the caller with a blocking send on the
-   connection's fd, under a send timeout. */
+/* The connection loop behind net::Loop: one thread polls the listening socket and every
+   open connection. Ready connections are served round robin; responses are written by
+   the caller with a blocking send on the connection's fd, under a send timeout. */
 #define _GNU_SOURCE  /* memmem on glibc */
 #include "goose.h"
 
@@ -139,9 +133,7 @@ void gnet_loop_close(uint64_t h, int32_t fd) {
         if (l->conns[i].fd == fd) { drop(l, i); return; }
 }
 
-/* Takes bytes from the first ready connection, from where the round robin
-   left off. Returns 1 and a request, or an EV_ error code for a request to
-   reject (the caller answers and closes). */
+/* Returns 1 and a request, or an EV_ code for a request to reject (the caller answers and closes). */
 static int take_ready(gnet_loop *l, gs_rref out, int32_t *fd_out) {
     for (size_t k = 0; k < l->count; k++) {
         size_t i = (l->next + k) % l->count;
@@ -160,11 +152,9 @@ static int take_ready(gnet_loop *l, gs_rref out, int32_t *fd_out) {
 }
 
 static void accept_all(gnet_loop *l) {
-    /* With several loops on one listening socket, accept_max = 1 lets each
-       loop take one connection per wake, which spreads a burst. */
     for (int64_t taken = 0; l->accept_max <= 0 || taken < l->accept_max; taken++) {
         int fd = accept(l->listen_fd, NULL, NULL);
-        if (fd < 0) return;   /* EAGAIN: none left */
+        if (fd < 0) return;
         set_blocking(fd, 1);  /* BSD sockets inherit O_NONBLOCK from the listener */
         int one = 1;
         setsockopt(fd, IPPROTO_TCP, TCP_NODELAY, &one, sizeof one);

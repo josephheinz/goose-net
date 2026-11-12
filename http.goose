@@ -1,20 +1,4 @@
-// http: a small HTTP/1.1 server and client on top of net.
-//
-//   import net from "../goose-net";
-//   import net.http;
-//
-//   http::serve(net::listen(8080)) { req, res =>
-//       match req.method {
-//           Get => http::text(res, http::Status.Ok, "hi\n"),
-//           _ => http::json_error(res, http::Status.MethodNotAllowed, "GET only"),
-//       }
-//   };
-//
-//   var body: u8[>..] = [];
-//   let status, ok = http::get("http://localhost:8080/hello", body);
-//
-// The server handles one connection at a time and closes each one after its
-// response. The client speaks plain http:// only, with no TLS.
+// http: a small HTTP/1.1 server and client on top of net. The client speaks plain http:// only, with no TLS.
 
 namespace http;
 
@@ -96,7 +80,6 @@ fn reason(s: Status) -> const u8[:] {
     }
 }
 
-// The Status for a numeric code: a named variant when there is one.
 fn status_from_code(c: i64) -> Status {
     match c {
         200 => Status.Ok, 201 => Status.Created, 202 => Status.Accepted, 204 => Status.NoContent,
@@ -111,7 +94,6 @@ fn status_from_code(c: i64) -> Status {
     }
 }
 
-// Prints as "404 Not Found".
 fn format(out: u8[>..]&, s: Status) { format(out, code(s), " ", reason(s)); }
 
 fn is_success(s: Status) -> bool { let c = code(s); c >= 200 && c < 300 }
@@ -124,14 +106,12 @@ fn has_body(s: Status) -> bool {
 
 fn lower(c: u8) -> u8 { if c >= 'A' && c <= 'Z' { c + 32 } else { c } }
 
-// ASCII case-insensitive equality, for header names.
 fn eq_nocase(a: const u8[:], b: const u8[:]) -> bool {
     if a.len != b.len { return false; }
     for i in a.len { if lower(a[i]) != lower(b[i]) { return false; } }
     return true;
 }
 
-// The value of the first header called name in a block of header lines.
 fn find_header(head: const u8[:], name: const u8[:]) -> const u8[:], bool {
     each_split(head, "\r\n") { line =>
         let key, value, has = split_once(line, ':');
@@ -154,7 +134,6 @@ fn is_chunked(head: const u8[:]) -> bool {
     return has && find(value, "chunked") >= 0;
 }
 
-// Decodes a chunked body (RFC 9112 §7.1), appending the data to out.
 fn decode_chunked(s: const u8[:], out: u8[>..]&) -> bool {
     var pos = 0;
     loop {
@@ -171,7 +150,7 @@ fn decode_chunked(s: const u8[:], out: u8[>..]&) -> bool {
     }
 }
 
-// Decodes %XX escapes and '+' (as a space) and appends the result to out.
+// Decodes %XX escapes and '+' (as a space).
 fn url_decode(out: u8[>..]&, s: const u8[:]) {
     var i = 0;
     while i < s.len {
@@ -186,14 +165,14 @@ fn url_decode(out: u8[>..]&, s: const u8[:]) {
 
 // ---------------------------------------------------------------- server
 
-// One request. The slices are views into the buffer read_request filled.
+// The slices are views into the buffer read_request filled.
 struct Request {
     method: Method,
     method_text: const u8[:], // as sent, for Method.Other
-    target: const u8[:],      // "/todos/3?verbose=1"
-    path: const u8[:],        // "/todos/3"
-    query: const u8[:],       // "verbose=1"
-    version: const u8[:],     // "HTTP/1.1"
+    target: const u8[:],
+    path: const u8[:],
+    query: const u8[:],
+    version: const u8[:],
     head: const u8[:],        // the header lines, CRLF separated
     body: const u8[:]
 }
@@ -202,16 +181,14 @@ fn empty_request() -> Request {
     Request { method: Method.Other, method_text: "", target: "", path: "", query: "", version: "", head: "", body: "" }
 }
 
-// What read_request found.
 enum Read {
-    Ready,                       // a whole, well-formed request
+    Ready,
     Closed,                      // the client went away or timed out
     Reject { status: Status }    // answer with this status and close
 }
 
 fn reject(s: Status) -> Request, Read { return empty_request(), Read.Reject { status: s }; }
 
-// Reads one request from conn into raw.
 fn read_request(conn: net::Socket, raw: u8[>..]&, limit: i64 = 1048576) -> Request, Read {
     var head_end = -1;
     var want = -1;
@@ -251,15 +228,13 @@ fn parse_request(raw: const u8[:]) -> Request, Read {
     return req, Read.Ready;
 }
 
-// Whether the client asked to keep the connection open: the default for
-// HTTP/1.1, and "Connection: keep-alive" for HTTP/1.0.
+// True for HTTP/1.1 unless "Connection: close"; HTTP/1.0 needs "Connection: keep-alive".
 fn wants_keep_alive(req: const Request&) -> bool {
     let value, has = find_header(req.head, "connection");
     if req.version == "HTTP/1.1" { return !(has && eq_nocase(value, "close")); }
     return has && eq_nocase(value, "keep-alive");
 }
 
-// The value of a request header, matched without regard to case.
 fn header(req: const Request&, name: const u8[:]) -> const u8[:], bool {
     return find_header(req.head, name);
 }
@@ -273,10 +248,8 @@ fn query_param(req: const Request&, name: const u8[:]) -> const u8[:], bool {
     return "", false;
 }
 
-// The raw value of the request cookie called name (RFC 6265 section 5.4): a
-// view into the Cookie header, with one pair of surrounding double quotes
-// removed. Names match exactly. The first pair with that name wins, a pair
-// without '=' is skipped, and only the first Cookie header is read.
+// A view into the first Cookie header (RFC 6265 section 5.4), with one pair of double quotes removed.
+// Names match exactly; the first pair with that name wins and a pair without '=' is skipped.
 fn cookie(req: const Request&, name: const u8[:]) -> const u8[:], bool {
     let line, has = find_header(req.head, "cookie");
     if !has || name.len == 0 { return "", false; }
@@ -291,8 +264,7 @@ fn cookie(req: const Request&, name: const u8[:]) -> const u8[:], bool {
     return "", false;
 }
 
-// When path is prefix followed by one more segment, that segment:
-// path_param("/todos/42", "/todos/") is "42", true.
+// When path is prefix followed by one more segment, that segment.
 fn path_param(path: const u8[:], prefix: const u8[:]) -> const u8[:], bool {
     if !starts_with(path, prefix) || path.len == prefix.len { return "", false; }
     let rest = path[prefix.len..];
@@ -307,7 +279,6 @@ fn new_response() -> Response {
     Response { status: Status.Ok, content_type: "text/plain; charset=utf-8", headers: "", body: [] }
 }
 
-// Adds a response header line.
 fn set_header(res: Response&, name: const u8[:], value: const u8[:]) {
     format(res.headers, name, ": ", value, "\r\n");
 }
@@ -325,7 +296,6 @@ fn add_header(res: Response&, name: const u8[:], value: const u8[:]) -> bool {
     return true;
 }
 
-// A plain text reply.
 fn text(res: Response&, status: Status, s: const u8[:]) {
     res.status = status;
     res.content_type.clear();
@@ -333,7 +303,6 @@ fn text(res: Response&, status: Status, s: const u8[:]) {
     res.body.append(s);
 }
 
-// Marks the reply as JSON. Write the JSON into res.body.
 fn json_reply(res: Response&, status: Status) {
     res.status = status;
     res.content_type.clear();
@@ -350,15 +319,12 @@ fn json_error(res: Response&, status: Status, msg: const u8[:]) {
     res.body.push('}');
 }
 
-// Writes the response to conn. A HEAD request gets the headers only.
-// keep_alive tells the client the connection stays open.
 fn send_response(conn: net::Socket, res: const Response&, head_only: bool = false, keep_alive: bool = false) -> bool {
     return send_response_with(conn, res, res.body, head_only, keep_alive);
 }
 
-// As send_response, with the body taken from body instead of res.body, so
-// a body that lives elsewhere (an embedded file, say) is never copied. The
-// head and the body go out in one writev.
+// Sends body instead of res.body, so a body that lives elsewhere (an embedded file) is never copied;
+// head and body go out in one writev.
 fn send_response_with(conn: net::Socket, res: const Response&, body: const u8[:], head_only: bool = false,
                       keep_alive: bool = false) -> bool {
     var head: u8[>..] = [];
@@ -374,13 +340,8 @@ fn send_response_with(conn: net::Socket, res: const Response&, body: const u8[:]
     return conn.send(head, body);
 }
 
-// Accepts connections on server forever and answers each request by calling
-// F(req: const Request&, res: Response&). The handler runs on this thread,
-// one request at a time, while a poll loop keeps every connection open:
-// keep-alive clients send request after request on one connection, and
-// ready connections are served round robin. keep_alive = false closes each
-// connection after its response. timeout_ms closes idle connections.
-// log prints a line per request.
+// Accepts connections forever, calling F(req: const Request&, res: Response&) on this thread, one request at a time.
+// keep_alive = false closes each connection after its response; timeout_ms closes idle ones.
 fn serve<F>(server: net::Socket, log: bool = true, timeout_ms: i64 = 5000, limit: i64 = 1048576,
             keep_alive: bool = true, accept_max: i64 = 0) {
     let lp = net::connection_loop(server, timeout_ms, limit, accept_max);
@@ -427,7 +388,6 @@ fn serve<F>(server: net::Socket, log: bool = true, timeout_ms: i64 = 5000, limit
 // reach a growable global.
 var client_error: u8[..256];
 
-// Why the last client call failed.
 fn last_error() -> const u8[:] { client_error }
 
 fn client_fail(msg: const u8[:]) -> Status, bool {
@@ -436,7 +396,6 @@ fn client_fail(msg: const u8[:]) -> Status, bool {
     return Status.Other { code: 0 }, false;
 }
 
-// Splits "http://host[:port]/path?query" into its parts.
 fn parse_url(url: const u8[:]) -> const u8[:], i64, const u8[:], bool {
     if !starts_with(url, "http://") { return "", 0, "", false; }
     let rest = url[7..];
@@ -455,9 +414,7 @@ fn parse_url(url: const u8[:]) -> const u8[:], i64, const u8[:], bool {
     return host, port, target, true;
 }
 
-// Sends a request and appends the response body to out. Returns the status
-// and true, or false with the reason in last_error(). content_type is sent
-// only with a body. Plain http:// only.
+// Returns the status and true, or false with the reason in last_error(). content_type is sent only with a body.
 fn request(method: Method, url: const u8[:], body: const u8[:], out: u8[>..]&,
            content_type: const u8[:] = "application/json", timeout_ms: i64 = 10000) -> Status, bool {
     if method == Method.Other { return client_fail("http: Method.Other cannot be sent"); }

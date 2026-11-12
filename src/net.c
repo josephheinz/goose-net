@@ -1,7 +1,5 @@
-/* The native part of the Goose `net` package: thin wrappers over POSIX
-   sockets. Byte slices arrive as { data, len } structs, and builders as the
-   runtime's gs_rref, which gs_bld_append writes to (goose.h). Every function
-   that fails records a message that gnet_error hands back. */
+/* The native part of the Goose `net` package: thin wrappers over POSIX sockets.
+   A function that fails records a message for gnet_error. */
 #include "goose.h"
 
 #include <stdint.h>
@@ -47,8 +45,6 @@ void gnet_error(gs_rref out) {
     gs_bld_append(out, gnet_last_error, strlen(gnet_last_error));
 }
 
-/* Resolves host and port, then calls bind/listen or connect on the first
-   address that works. */
 static int open_socket(gnet_bytes host_s, int32_t port, int passive, int backlog, int64_t timeout_ms) {
     ignore_sigpipe();
     char host[256], service[16];
@@ -118,8 +114,6 @@ int32_t gnet_accept(int32_t listen_fd) {
     return fd;
 }
 
-/* Appends up to max bytes to out. Returns the count, 0 at end of stream,
-   -1 on an error or a timeout. */
 int64_t gnet_recv(int32_t fd, gs_rref out, int64_t max) {
     char buf[65536];
     if (max <= 0) return 0;
@@ -131,7 +125,6 @@ int64_t gnet_recv(int32_t fd, gs_rref out, int64_t max) {
     return (int64_t)n;
 }
 
-/* Sends every byte. 1 on success, 0 on failure. */
 int32_t gnet_send_all(int32_t fd, gnet_bytes data) {
     const uint8_t *p = data.data;
     int64_t len = data.len;
@@ -148,7 +141,6 @@ int32_t gnet_send_all(int32_t fd, gnet_bytes data) {
     return 1;
 }
 
-/* Sends a then b with writev, without joining them first. 1 on success. */
 int32_t gnet_send2(int32_t fd, gnet_bytes a, gnet_bytes b) {
     struct iovec iov[2] = { { (void *)a.data, (size_t)a.len }, { (void *)b.data, (size_t)b.len } };
     int n = 2, i = 0;
@@ -169,7 +161,6 @@ void gnet_close(int32_t fd) { if (fd >= 0) close(fd); }
 
 void gnet_shutdown_write(int32_t fd) { shutdown(fd, SHUT_WR); }
 
-/* Read and write timeout in milliseconds; 0 means wait forever. */
 int32_t gnet_set_timeout(int32_t fd, int64_t ms) {
     struct timeval tv;
     tv.tv_sec = (time_t)(ms / 1000);
