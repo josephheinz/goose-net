@@ -7,6 +7,10 @@
 - `http::accepts(req, coding)` parses `Accept-Encoding`.
 - `net::detach` (`gnet_loop_detach`) takes a connection out of a `Loop` without closing it and hands back its unread bytes.
 
+- `net::Hub` (`import net.hub`): `hub`, `add`, `send`, `publish`, `close`, `count` and `next` for chunked streams and WebSockets on one poll thread, with `HubKind` and `HubEvent`. C core in `src/hub_core.c`, glue in `src/hub.c`.
+- `http::websocket_accept(key)` computes `Sec-WebSocket-Accept`.
+- `examples/ws_echo.goose`.
+
 ## v0.2.1
 
 No code change. Tagged with goose-web v0.2.1, which pins one tag for all three packages.

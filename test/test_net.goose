@@ -3,6 +3,7 @@
 
 import net from "..";
 import net.http;
+import net.hub;
 import std;
 
 var failures = 0;
@@ -111,6 +112,48 @@ thread_fn stream_worker(server: net::Socket) {
         } else {
             lp.close_connection(conn);
         }
+    }
+}
+
+var ws_hub_handle: u64 = 0;
+
+// The hub thread: echoes text, and closes a connection that sends "bye".
+thread_fn ws_hub_worker(handle: u64) {
+    let h = net::Hub { handle: handle };
+    loop {
+        var msg: u8[>..] = [];
+        var topic: u8[>..] = [];
+        let id, ev = h.next(msg, topic);
+        match ev {
+            Text => {
+                if msg == "bye" { h.close(id); } else { h.send(id, msg); }
+            },
+            Binary => { h.send(id, msg, true); },
+            _ => {},
+        }
+    }
+}
+
+// Upgrades /ws to topic "room" and /other to topic "other"; every upgraded socket goes to the hub.
+thread_fn ws_server(server: net::Socket) {
+    let h = net::Hub { handle: ws_hub_handle };
+    let lp = net::connection_loop(server, 5000);
+    var raw: u8[>..] = [];
+    loop {
+        raw.clear();
+        let conn, ev = lp.next(raw);
+        if ev != net::Event.Request { lp.close_connection(conn); continue; }
+        let req, outcome = http::parse_request(raw);
+        let key, has_key = http::header(req, "Sec-WebSocket-Key");
+        if !has_key { lp.close_connection(conn); continue; }
+        var res = http::new_response();
+        res.status = http::Status.SwitchingProtocols;
+        http::set_header(res, "Upgrade", "websocket");
+        http::add_header(res, "Sec-WebSocket-Accept", http::websocket_accept(key));
+        http::send_head(conn, res, "Upgrade");
+        var rest: u8[>..] = [];
+        lp.detach(conn, rest);
+        h.add(conn, net::HubKind.WebSocket, if req.path == "/other" { "other" } else { "room" }, rest);
     }
 }
 
@@ -556,6 +599,99 @@ fn detach_test(port: i64) {
     d.close();
 }
 
+// A client frame with mask 01 02 03 04, or without one when masked is false. Payloads under 126 bytes.
+fn ws_frame(opcode: i64, payload: const u8[:], masked: bool = true) -> u8[>..] {
+    var f: u8[>..] = [];
+    f.push((128 + opcode) as u8);
+    if masked {
+        f.push((128 + payload.len) as u8);
+        for m in 4 { f.push((m + 1) as u8); }
+        for i in payload.len { f.push((payload[i] ^ ((i % 4 + 1) as u8))); }
+    } else {
+        f.push(payload.len as u8);
+        f.append(payload);
+    }
+    return f;
+}
+
+fn close_code(code: i64) -> u8[>..] {
+    var p: u8[>..] = [];
+    p.push((code / 256) as u8);
+    p.push((code % 256) as u8);
+    return p;
+}
+
+// Reads one server frame (unmasked, under 126 bytes) into payload; returns its opcode, or -1.
+fn ws_read(conn: net::Socket, payload: u8[>..]&) -> i64 {
+    var buf: u8[>..] = [];
+    while buf.len < 2 || buf.len < 2 + (buf[1] as i64) {
+        if conn.recv(buf) <= 0 { return -1; }
+    }
+    let n = buf[1] as i64;
+    payload.append(buf[2..2 + n]);
+    return (buf[0] as i64) & 15;
+}
+
+fn ws_connect(port: i64, path: const u8[:]) -> net::Socket {
+    let c = net::connect("127.0.0.1", port);
+    c.set_timeout(3000);
+    var head: u8[>..] = [];
+    var req: u8[>..] = [];
+    format(req, "GET ", path, " HTTP/1.1\r\nHost: x\r\nUpgrade: websocket\r\nConnection: Upgrade\r\n",
+           "Sec-WebSocket-Key: dGhlIHNhbXBsZSBub25jZQ==\r\nSec-WebSocket-Version: 13\r\n\r\n");
+    check(c.send(req), "ws: send handshake");
+    while find(head, "\r\n\r\n") < 0 { if c.recv(head) <= 0 { break; } }
+    check(starts_with(head, "HTTP/1.1 101 Switching Protocols\r\n"), "ws: 101");
+    check(find(head, "Sec-WebSocket-Accept: s3pPLMBiTxaQ9kYGzzhZRbK+xOo=\r\n") >= 0, "ws: accept header");
+    return c;
+}
+
+fn ws_expect(c: net::Socket, opcode: i64, text: const u8[:], what: const u8[:]) {
+    var p: u8[>..] = [];
+    let op = ws_read(c, p);
+    check(op == opcode, str(what, ": opcode ", op));
+    check_eq(p, text, what);
+}
+
+fn websocket_tests(port: i64, h: net::Hub) {
+    check_eq(http::websocket_accept("dGhlIHNhbXBsZSBub25jZQ=="), "s3pPLMBiTxaQ9kYGzzhZRbK+xOo=", "websocket_accept: RFC 6455 example");
+
+    let a = ws_connect(port, "/ws");
+    check(a.send(ws_frame(1, "hello")), "ws: send text");
+    ws_expect(a, 1, "hello", "ws: echo");
+
+    let b = ws_connect(port, "/ws");
+    let o = ws_connect(port, "/other");
+    // count includes connections the hub thread has not taken in yet, so this wait is for the adds.
+    var spins = 0;
+    while h.count("room") < 2 && spins < 50000000 { spins += 1; }
+    check(h.count("room") == 2 && h.count("other") == 1 && h.count("") == 3, "ws: counts by topic");
+
+    check(h.publish("room", "news"), "ws: publish");
+    ws_expect(a, 1, "news", "ws: publish to first client");
+    ws_expect(b, 1, "news", "ws: publish to second client");
+    // The "other" client got nothing from publish: its first frame is its own echo.
+    check(o.send(ws_frame(1, "mine")), "ws: other send");
+    ws_expect(o, 1, "mine", "ws: other topic did not get the publish");
+
+    // A client close is echoed, then the socket closes.
+    check(a.send(ws_frame(8, close_code(1000))), "ws: send close");
+    ws_expect(a, 8, close_code(1000), "ws: close echoed");
+    check(closed_by_peer(a), "ws: socket closed after close");
+    a.close();
+
+    // The server closes on request.
+    check(b.send(ws_frame(1, "bye")), "ws: send bye");
+    var pb: u8[>..] = [];
+    check(ws_read(b, pb) == 8, "ws: server close frame");
+    b.close();
+
+    // An unmasked client frame is a protocol error: close 1002.
+    check(o.send(ws_frame(1, "raw", false)), "ws: send unmasked");
+    ws_expect(o, 8, close_code(1002), "ws: unmasked closes with 1002");
+    o.close();
+}
+
 fn main() {
     enum_tests();
     unit_tests();
@@ -574,11 +710,17 @@ fn main() {
     let stream_server = net::listen(0, "127.0.0.1");
     thread_spawn(stream_worker, stream_server);
 
+    ws_hub_handle = net::hub(1000, 65536, 1048576, 0).handle;
+    thread_spawn(ws_hub_worker, ws_hub_handle);
+    let ws_listener = net::listen(0, "127.0.0.1");
+    thread_spawn(ws_server, ws_listener);
+
     http_tests(str("http://127.0.0.1:", port), str("http://127.0.0.1:", raw_server.local_port(), "/"));
     keep_alive_tests(port);
     cookie_wire_test(port);
     stream_tests(stream_server.local_port());
     detach_test(stream_server.local_port());
+    websocket_tests(ws_listener.local_port(), net::Hub { handle: ws_hub_handle });
 
     print(checks - failures, "/", checks, " checks passed");
     if failures > 0 { exit(1); }

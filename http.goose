@@ -383,6 +383,17 @@ fn send_head(conn: net::Socket, res: const Response&, connection: const u8[:]) -
     return conn.send(head);
 }
 
+extern fn c_ws_accept_key(key: const u8[:], out: u8[>..]&) = "gnet_ws_accept_key";
+
+// The Sec-WebSocket-Accept value for a client's Sec-WebSocket-Key: base64 of SHA-1(key + the RFC 6455 GUID).
+fn websocket_accept(key: const u8[:]) -> u8[..28] {
+    var tmp: u8[>..] = [];
+    c_ws_accept_key(key, tmp);
+    var out: u8[..28] = "";
+    out.append(tmp);
+    return out;
+}
+
 // HTTP/1.0 clients do not understand chunked framing.
 fn supports_chunked(req: const Request&) -> bool { req.version != "HTTP/1.0" }
 

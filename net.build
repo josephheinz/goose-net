@@ -1,3 +1,4 @@
-// The native part of the net package: POSIX sockets.
-c_sources = ["src/net.c", "src/loop.c"];
+// The native part of the net package: POSIX sockets and the hub's poll thread.
+c_sources = ["src/net.c", "src/loop.c", "src/hub_core.c", "src/hub.c"];
+c_libs = ["pthread"];
 exclude = ["examples", "test"];

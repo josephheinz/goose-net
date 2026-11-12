@@ -143,6 +143,36 @@ It answers bad requests with 400, 413, 431 or 501 and closes them. A `HEAD` requ
 Other helpers: `parse_request(raw)` parses one whole request, `wants_keep_alive(req)` reads the client's choice,
 and `read_request(conn, raw&, limit)` reads one request from a socket you accepted yourself.
 
+### Long-lived connections: `net::Hub`
+
+`import net.hub;` gives one poll thread that serves many open connections: chunked event streams and WebSockets (RFC 6455, no extensions).
+Take a connection out of a `Loop` with `net::detach`, answer the upgrade with `http::send_head`, then hand it to the hub.
+
+```goose
+let h = net::hub();                                   // max_conns, max_message, out_limit, ping_ms
+thread_spawn(hub_thread, h.handle);                   // the one thread that calls next
+// in the request loop, after send_head(conn, res, "Upgrade") and lp.detach(conn, rest):
+h.add(conn, net::HubKind.WebSocket, "room", rest);
+h.publish("room", "hello");                           // any thread
+// hub_thread: let id, ev = h.next(msg, topic);       // Open, Text, Binary, Close or Failed
+```
+
+| Function | What it does |
+|---|---|
+| `hub(max_conns = 10000, max_message = 65536, out_limit = 1048576, ping_ms = 30000)` | Make a hub. `ping_ms <= 0` turns off pings, heartbeats and the silence timeout. |
+| `add(h, conn, kind, topic, pending, heartbeat = "")` | Give the hub the socket (`HubKind.Stream` or `WebSocket`). Returns an id that is never reused, or 0 when full or the topic is over 64 bytes (the socket is closed). `pending` is the `rest` from `detach`. |
+| `send(h, id, data, binary = false)`, `publish(h, topic, data, binary = false)` | Queue a message for one connection, or for every connection with exactly that topic. False when the queue is over 64 MB. |
+| `close(h, id)` | Close gracefully: a close frame, or the final chunk. |
+| `count(h, topic)` | Connections with the topic; `""` counts all. |
+| `next(h, out&, topic&)` | Hub thread only. Runs the poll loop until an event and returns `id, HubEvent`. `out` gets a `Text` or `Binary` message. |
+
+`add`, `send`, `publish`, `close` and `count` work from any thread; `next` must be called from one.
+A `Stream` sends each message as one chunk and the `heartbeat` every `ping_ms`.
+A `WebSocket` closes with 1002 on an unmasked frame, 1007 on bad UTF-8 and 1009 past `max_message`, answers pings, echoes a close,
+and is closed after 2.5 x `ping_ms` of silence. A connection whose output passes `out_limit` is closed.
+`Open` is reported when the hub takes a connection in, and `Close` once for each opened connection.
+`http::websocket_accept(key)` gives the `Sec-WebSocket-Accept` value. `examples/ws_echo.goose` is a complete server.
+
 ### HTTP client: `http`
 
 ```goose
@@ -169,8 +199,14 @@ goose build examples/hello_http.goose && examples/hello_http
 ```
 
 ```bash
+goose build examples/ws_echo.goose && examples/ws_echo
+```
+
+```bash
 goose build test/test_net.goose && test/test_net
 ```
+
+The hub's C core has its own test: `cc -std=c11 -Wall -Wextra -pthread src/hub_core.c test/hub_core_test.c -o hub_test && ./hub_test`.
 
 The tests use worker threads, so they need `goose build`. The examples also run with `goose examples/hello_http.goose`.
 
