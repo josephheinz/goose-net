@@ -199,6 +199,8 @@ int32_t gnet_listen_inherited(gnet_bytes host, int32_t port, int32_t backlog, in
     pthread_mutex_unlock(&emu);
     if (use) {
         if (is_listener(3)) {
+            /* Linux has no SO_NOSIGPIPE; gnet_listen does this for a fresh listener. */
+            signal(SIGPIPE, SIG_IGN);
             fcntl(3, F_SETFD, FD_CLOEXEC);
             *inherited = 1;
             return 3;
