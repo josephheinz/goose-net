@@ -1,5 +1,14 @@
-test/test_net
-examples/echo
-examples/hello_http
+test/*
+!test/*.*
+!test/*/
+examples/*
+!examples/*.*
+!examples/*/
+.gooseweb/
+.gooseweb.dev/
 *.o
 *.dSYM/
+*.db-journal
+*.db-wal
+*.db-shm
+.DS_Store
