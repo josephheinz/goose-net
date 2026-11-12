@@ -63,6 +63,32 @@ loop {
 `net::Event` is `Request`, `TooLarge`, `HeadTooLarge`, `Unsupported` (a chunked body), `BadLength` or `Failed`.
 The loop makes the listening socket non-blocking.
 
+### Lifecycle: `net.lifecycle`
+
+```goose
+import net.lifecycle;
+
+net::stop_on_signals(0, 10000);                      // first in main
+let server, inherited = net::listen_inherited(8080);
+// ... start the workers ...
+net::ready();
+```
+
+| Function | What it does |
+|---|---|
+| `stop_on_signals(delay_ms = 0, drain_ms = 10000)` | SIGTERM or SIGINT starts a stop; a second one exits at once. |
+| `request_stop()` | The same as a SIGTERM. |
+| `stop_phase()`, `stopping()`, `draining()` | 0 running, 1 stopping (still accepting), 2 draining. |
+| `wait_stop(ms) -> bool` | Sleep up to `ms`; true once stopping. |
+| `listen_inherited(port, host, backlog) -> Socket, bool` | Like `listen`, but takes fd 3 from systemd or a handoff. |
+| `enable_handoff(server, argv)` | SIGUSR2 starts the program again on the same listener; `argv` is the arguments joined by NUL bytes. |
+| `ready()` | Sends `READY=1` to systemd. In a handoff child it also stops the old process. |
+
+Phase 1 lasts `delay_ms`, so a load balancer can stop routing. In phase 2 loops stop accepting and close idle
+connections, and `Loop.next` returns `Event.Stopped` once no connection is left or `drain_ms` has passed.
+The process exits after `delay_ms + drain_ms + 5000` ms whatever the loops do.
+The C test suite is `test/c/run.sh`.
+
 ### HTTP server: `http`
 
 ```goose
