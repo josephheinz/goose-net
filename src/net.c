@@ -1,5 +1,7 @@
 /* The native part of the Goose `net` package: thin wrappers over POSIX sockets.
    A function that fails records a message for gnet_error. */
+#define _GNU_SOURCE
+
 #include "goose.h"
 
 #include <stdint.h>

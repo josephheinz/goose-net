@@ -98,7 +98,8 @@ enum Event {
     BadLength,
     Failed,
     Spooled,        // set_uploads only: out holds the head through its blank line; the body is in spool_path
-    SpoolFailed     // set_uploads only: the spool file could not be written; answer 500 and close
+    SpoolFailed,    // set_uploads only: the spool file could not be written; answer 500 and close
+    Stopped         // the process is stopping and this loop has drained: close it and return
 }
 
 extern fn c_loop_new(listen_fd: i32, idle_ms: i64, max_request: i64, accept_max: i64) -> u64 = "gnet_loop_new";
@@ -130,6 +131,7 @@ fn next(l: Loop, out: u8[>..]&) -> Socket, Event {
         5 => Event.BadLength,
         6 => Event.Spooled,
         7 => Event.SpoolFailed,
+        8 => Event.Stopped,
         _ => Event.Failed,
     };
     return Socket { fd: fd }, event;

@@ -22,7 +22,10 @@
 
 /* What gnet_loop_next found. The Goose side mirrors these in net::Event. */
 enum { EV_FAILED = -1, EV_REQUEST = 1, EV_TOO_LARGE = 2, EV_HEAD_TOO_LARGE = 3,
-       EV_UNSUPPORTED = 4, EV_BAD_LENGTH = 5, EV_SPOOLED = 6, EV_SPOOL_FAILED = 7 };
+       EV_UNSUPPORTED = 4, EV_BAD_LENGTH = 5, EV_SPOOLED = 6, EV_SPOOL_FAILED = 7, EV_STOPPED = 8 };
+
+int32_t gnet_wake_fd(void);
+int64_t gnet_drain_deadline_ms(void);
 
 #define MAX_HEAD 65536
 #define PATH_MAX_ 320
@@ -48,6 +51,9 @@ typedef struct {
     int64_t since_poll;         /* requests handed out since the last poll pass */
     gnet_conn *conns;
     size_t count, cap, next;    /* next: where the round robin resumes */
+    int wake_fd;                /* readable once the process reaches the drain phase */
+    int draining;
+    int64_t deadline_ms;        /* when a draining loop gives up on the connections left */
     struct pollfd *pfds;
     size_t pfd_cap;
     int64_t max_upload, spool_over;   /* set_uploads; max_upload 0 = off */
@@ -184,6 +190,7 @@ uint64_t gnet_loop_new(int32_t listen_fd, int64_t idle_ms, int64_t max_request, 
     l->max_request = max_request;
     l->accept_max = accept_max;
     l->max_upload = 0;
+    l->wake_fd = gnet_wake_fd();
     set_blocking(listen_fd, 0);
     return (uint64_t)(uintptr_t)l;
 }
@@ -320,10 +327,30 @@ static int fill(gnet_conn *c) {
     return 0;
 }
 
+/* Phase 2: stop accepting, take what has already arrived, and close the connections with nothing buffered. */
+static void start_drain(gnet_loop *l) {
+    l->draining = 1;
+    l->deadline_ms = gnet_drain_deadline_ms();
+    for (size_t i = l->count; i-- > 0;)
+        if (!fill(&l->conns[i])) drop(l, i);
+}
+
+static void drop_idle(gnet_loop *l) {
+    for (size_t i = l->count; i-- > 0;)
+        if (l->conns[i].len == 0) drop(l, i);
+}
+
 int32_t gnet_loop_next(uint64_t h, gs_rref out, int32_t *fd_out) {
     gnet_loop *l = (gnet_loop *)(uintptr_t)h;
     *fd_out = -1;
     for (;;) {
+        if (l->draining) {
+            drop_idle(l);
+            if (l->count == 0 || now_ms() >= l->deadline_ms) {
+                while (l->count) drop(l, 0);
+                return EV_STOPPED;
+            }
+        }
         /* After 16 requests from buffers, poll once without waiting, so new
            connections are accepted and filled even while every client
            already connected keeps this loop busy. */
@@ -332,19 +359,25 @@ int32_t gnet_loop_next(uint64_t h, gs_rref out, int32_t *fd_out) {
             if (ev) { l->since_poll++; return ev; }
         }
         int timeout = l->since_poll >= 16 ? 0 : 1000;
+        if (l->draining && timeout) {
+            int64_t left = l->deadline_ms - now_ms();
+            if (left < timeout) timeout = left > 0 ? (int)left : 0;
+        }
         l->since_poll = 0;
 
-        if (l->pfd_cap < l->count + 1) {
-            size_t cap = (l->count + 1) * 2;
+        if (l->pfd_cap < l->count + 2) {
+            size_t cap = (l->count + 2) * 2;
             struct pollfd *grown = realloc(l->pfds, cap * sizeof *grown);
             if (!grown) return EV_FAILED;
             l->pfds = grown;
             l->pfd_cap = cap;
         }
-        l->pfds[0] = (struct pollfd){ l->listen_fd, POLLIN, 0 };
+        /* A negative fd is skipped by poll, which keeps the indexes while draining. */
+        l->pfds[0] = (struct pollfd){ l->draining ? -1 : l->listen_fd, POLLIN, 0 };
         for (size_t i = 0; i < l->count; i++) l->pfds[i + 1] = (struct pollfd){ l->conns[i].fd, POLLIN, 0 };
         size_t polled = l->count;
-        int r = poll(l->pfds, (nfds_t)(polled + 1), timeout);
+        l->pfds[polled + 1] = (struct pollfd){ l->draining ? -1 : l->wake_fd, POLLIN, 0 };
+        int r = poll(l->pfds, (nfds_t)(polled + 2), timeout);
         if (r < 0 && errno != EINTR) return EV_FAILED;
 
         /* Read before accepting, so the indexes still match pfds. Walk
@@ -354,7 +387,8 @@ int32_t gnet_loop_next(uint64_t h, gs_rref out, int32_t *fd_out) {
                 if (!fill(&l->conns[i])) drop(l, i);
             }
         }
-        if (l->pfds[0].revents & POLLIN) accept_all(l);
+        if (l->pfds[polled + 1].revents & POLLIN) start_drain(l);
+        if (!l->draining && (l->pfds[0].revents & POLLIN)) accept_all(l);
 
         if (l->idle_ms > 0) {
             int64_t now = now_ms();
