@@ -1,0 +1,3 @@
+// The native part of the net package: POSIX sockets.
+c_sources = ["src/net.c", "src/loop.c"];
+exclude = ["examples", "test"];
