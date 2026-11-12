@@ -1,5 +1,9 @@
 # Changelog
 
+## v0.2.0
+
+No code change. Tagged with goose-web v0.2.0, which pins one tag for all three packages.
+
 ## v0.1.1
 
 The repo moved from `jheinz-bzs` to `josephheinz`. No code change.
