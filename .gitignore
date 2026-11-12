@@ -6,6 +6,7 @@ examples/*
 !examples/*/
 .gooseweb/
 .gooseweb.dev/
+.gooseweb.test/
 *.o
 *.dSYM/
 *.db-journal
