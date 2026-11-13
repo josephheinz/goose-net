@@ -1,5 +1,9 @@
 # Changelog
 
+## v0.6.0
+
+No code change. Tagged with gweb v0.6.0.
+
 ## v0.5.1
 
 Tagged with gweb v0.5.1. Tests only: the C test macro `WAIT_FOR` builds under GCC `-Werror`, and the WebSocket count test waits on time, not a spin count.
