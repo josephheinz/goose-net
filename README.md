@@ -8,7 +8,7 @@ POSIX only (macOS and Linux). The native part is `src/net.c`, which `goose` comp
 In your program's root file:
 
 ```goose
-import net from "josephheinz/goose-net@v0.2.1";   // or a path to a checkout
+import net from "josephheinz/goose-net@v0.3.0";   // or a path to a checkout
 import net.http;                                 // only if you want HTTP
 ```
 
