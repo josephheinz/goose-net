@@ -1,0 +1,57 @@
+# Tests goose-net on every push and pull request. A v* tag also publishes a GitHub release from CHANGELOG.md.
+# gweb's CI runs these tests too, with gweb on top; the three repos release together under one tag.
+name: ci
+
+on:
+  push:
+    branches: [main]
+    tags: ['v*']
+  pull_request:
+  workflow_dispatch:
+
+env:
+  GOOSE_VERSION: v2026.4
+
+jobs:
+  test:
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [macos-latest, ubuntu-latest]
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+      - name: Linux packages
+        if: runner.os == 'Linux'
+        run: sudo apt-get update && sudo apt-get install -y --no-install-recommends libsqlite3-dev
+      - name: Install goose
+        run: |
+          case "$RUNNER_OS" in
+            macOS) asset=goose-$GOOSE_VERSION-macos-arm64.tar.gz ;;
+            Linux) asset=goose-$GOOSE_VERSION-linux-x64.tar.gz ;;
+          esac
+          mkdir -p "$RUNNER_TEMP/goose"
+          curl -fsSL "https://github.com/aardappel/goose/releases/download/$GOOSE_VERSION/$asset" | tar -xz -C "$RUNNER_TEMP/goose"
+          dirname "$(find "$RUNNER_TEMP/goose" -type f -name goose | head -n 1)" >> "$GITHUB_PATH"
+      - name: Tests
+        run: |
+          (cd test && goose build -o "$RUNNER_TEMP/test_net" test_net.goose) && "$RUNNER_TEMP/test_net"
+          sh test/spool.sh
+          sh test/c/run.sh
+          cc -O2 -o "$RUNNER_TEMP/hub_core_test" test/hub_core_test.c src/hub_core.c -lpthread && "$RUNNER_TEMP/hub_core_test"
+
+  release:
+    if: startsWith(github.ref, 'refs/tags/v')
+    needs: test
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v4
+      - name: Publish the GitHub release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          awk -v h="## $GITHUB_REF_NAME" '$0 == h { on = 1; next } on && /^## / { exit } on { print }' CHANGELOG.md > notes.md
+          [ -s notes.md ] || { echo "CHANGELOG.md has no section for $GITHUB_REF_NAME" >&2; exit 1; }
+          gh release create "$GITHUB_REF_NAME" --title "goose-net $GITHUB_REF_NAME" --notes-file notes.md --verify-tag
