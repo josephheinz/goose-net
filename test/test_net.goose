@@ -6,6 +6,7 @@ import net.http;
 import net.hub;
 import net.lifecycle;
 import std;
+import os;
 
 var failures = 0;
 var checks = 0;
@@ -667,8 +668,8 @@ fn websocket_tests(port: i64, h: net::Hub) {
     let b = ws_connect(port, "/ws");
     let o = ws_connect(port, "/other");
     // count includes connections the hub thread has not taken in yet, so this wait is for the adds.
-    var spins = 0;
-    while h.count("room") < 2 && spins < 50000000 { spins += 1; }
+    var waited = 0;
+    while (h.count("room") < 2 || h.count("other") < 1) && waited < 5000 { sleep_ms(1); waited += 1; }
     check(h.count("room") == 2 && h.count("other") == 1 && h.count("") == 3, "ws: counts by topic");
 
     check(h.publish("room", "news"), "ws: publish");
