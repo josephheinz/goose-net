@@ -29,7 +29,7 @@ static void nap_ms(int ms) {
 
 /* Polls cond until it holds or ms pass. */
 #define WAIT_FOR(cond, ms) ({ int64_t until_ = mono_ms() + (ms); int ok_ = 0; \
-    while (!(ok_ = !!(cond)) && mono_ms() < until_) nap_ms(10); ok_; })
+    while (!(ok_ = !!(cond)) && mono_ms() < until_) { nap_ms(10); } ok_; })
 
 #define RESULT_FD 100
 
