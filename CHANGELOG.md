@@ -1,5 +1,9 @@
 # Changelog
 
+## v1.1.0
+
+No code change. Tagged with gweb v1.1.0.
+
 ## v1.0.0
 
 No code change. Tagged with gweb v1.0.0. From here gweb, goose-net and goose-sqlite follow semver together (gweb docs/site/stability.md).
