@@ -92,7 +92,7 @@ struct Loop { handle: u64 }
 
 enum Event {
     Request,
-    TooLarge,       // its body is over the limit
+    TooLarge,       // its body is over the limit: out holds the head through its blank line, the body is unread
     HeadTooLarge,   // its head is over 64 KB
     Unsupported,    // a chunked request body
     BadLength,
@@ -105,6 +105,7 @@ enum Event {
 extern fn c_loop_new(listen_fd: i32, idle_ms: i64, max_request: i64, accept_max: i64) -> u64 = "gnet_loop_new";
 extern fn c_loop_next(h: u64, out: u8[>..]&, fd: i32&) -> i32 = "gnet_loop_next";
 extern fn c_loop_close(h: u64, fd: i32) = "gnet_loop_close";
+extern fn c_loop_close_lingering(h: u64, fd: i32, ms: i64) = "gnet_loop_close_lingering";
 extern fn c_loop_detach(h: u64, fd: i32, rest: u8[>..]&) = "gnet_loop_detach";
 extern fn c_loop_free(h: u64) = "gnet_loop_free";
 extern fn c_loop_count(h: u64) -> i32 = "gnet_loop_count";
@@ -119,7 +120,7 @@ fn connection_loop(server: Socket, idle_ms: i64 = 5000, max_request: i64 = 10485
 
 // Waits for the next request and appends its bytes to out. The Socket is
 // the connection it came on: answer with send, then either leave it open or
-// call close_connection. After anything but Event.Request, close it.
+// call close_connection. After anything but Event.Request or Event.Spooled, close it (close_lingering after TooLarge).
 fn next(l: Loop, out: u8[>..]&) -> Socket, Event {
     var fd: i32 = -1;
     let ev = c_loop_next(l.handle, out, fd);
@@ -147,6 +148,11 @@ fn set_uploads(l: Loop, max_upload: i64, spool_over: i64, dir: const u8[:]) -> b
 fn spool_path(l: Loop, out: u8[>..]&) { c_loop_spool_path(l.handle, out); }
 
 fn close_connection(l: Loop, conn: Socket) { c_loop_close(l.handle, conn.fd); }
+
+// For a reply sent while the client may still be sending (Event.TooLarge): shuts the write side, then reads and
+// drops what arrives until the client closes, the connection idles past idle_ms, or ms pass, and closes it.
+// The client then reads the reply instead of a connection reset. ms <= 0, or a draining loop, closes at once.
+fn close_lingering(l: Loop, conn: Socket, ms: i64 = 10000) { c_loop_close_lingering(l.handle, conn.fd, ms); }
 
 // Takes conn out of the loop without closing it, for a protocol upgrade or a long-lived stream, and
 // appends to rest any bytes the client sent after the request next returned (a WebSocket client may

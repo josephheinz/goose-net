@@ -476,7 +476,7 @@ fn serve<F>(server: net::Socket, log: bool = true, timeout_ms: i64 = 5000, limit
                 };
                 json_error(res, status, reason(status));
                 send_response(conn, res);
-                lp.close_connection(conn);
+                if ev == net::Event.TooLarge { lp.close_lingering(conn); } else { lp.close_connection(conn); }
             },
         }
     }

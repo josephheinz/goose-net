@@ -61,6 +61,8 @@ loop {
 ```
 
 `net::Event` is `Request`, `TooLarge`, `HeadTooLarge`, `Unsupported` (a chunked body), `BadLength`, `Failed` or `Stopped` (the process is stopping and the loop has drained: see Lifecycle).
+
+After `TooLarge`, `out` holds the request's head (through its blank line), so the reply can depend on the route and the client; the body is unread. Answer, then call `lp.close_lingering(conn, ms = 10000)` rather than `close_connection`: it shuts the write side and reads and drops what the client still sends until it closes, idles past `idle_ms`, or `ms` pass. A browser still uploading then shows the reply instead of a connection reset. Added in 1.5.
 The loop makes the listening socket non-blocking.
 
 ### Lifecycle: `net.lifecycle`

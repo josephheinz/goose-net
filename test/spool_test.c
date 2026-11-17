@@ -7,6 +7,9 @@
 #include <fcntl.h>
 #include <pthread.h>
 #include <signal.h>
+#include <errno.h>
+#include <poll.h>
+#include <time.h>
 #include <sys/stat.h>
 #include <sys/socket.h>
 #include <netinet/in.h>
@@ -19,6 +22,7 @@ int32_t gnet_loop_next(uint64_t, gs_rref, int32_t *);
 int32_t gnet_loop_count(uint64_t);
 int32_t gnet_loop_set_uploads(uint64_t, int64_t, int64_t, gnet_bytes);
 void gnet_loop_spool_path(uint64_t, gs_rref);
+void gnet_loop_close_lingering(uint64_t, int32_t, int64_t);
 
 enum { REQUEST = 1, TOO_LARGE = 2, SPOOLED = 6, SPOOL_FAILED = 7 };
 
@@ -92,6 +96,58 @@ static uint64_t new_loop(int64_t max_req) { return gnet_loop_new(listen_fd, 5000
 static int set_up(uint64_t l, int64_t max_up, int64_t over, const char *dir) {
     return gnet_loop_set_uploads(l, max_up, over, (gnet_bytes){ (const uint8_t *)dir, (int64_t)strlen(dir) });
 }
+
+/* A client that sends a whole oversized request, then reads the reply to EOF. */
+typedef struct { const uint8_t *data; size_t len; size_t sent; char reply[256]; size_t got; int reset; pthread_t th; } uploader;
+static void *upload_run(void *arg) {
+    uploader *u = arg;
+    int fd = socket(AF_INET, SOCK_STREAM, 0);
+    struct sockaddr_in a = { .sin_family = AF_INET, .sin_port = htons((uint16_t)port),
+                             .sin_addr.s_addr = htonl(INADDR_LOOPBACK) };
+    if (connect(fd, (struct sockaddr *)&a, sizeof a) < 0) { close(fd); u->reset = 1; return NULL; }
+    while (u->sent < u->len) {
+        ssize_t w = write(fd, u->data + u->sent, u->len - u->sent);
+        if (w <= 0) { if (errno == ECONNRESET || errno == EPIPE) u->reset = 1; break; }
+        u->sent += (size_t)w;
+    }
+    for (;;) {
+        ssize_t r = recv(fd, u->reply + u->got, sizeof u->reply - 1 - u->got, 0);
+        if (r < 0 && errno == ECONNRESET) u->reset = 1;
+        if (r <= 0) break;
+        u->got += (size_t)r;
+        if (u->got >= sizeof u->reply - 1) break;
+    }
+    close(fd);
+    return NULL;
+}
+
+/* A client that sends data, then holds the connection without closing; done is set when the server closes it. */
+typedef struct { const uint8_t *data; size_t len; int done; int ms; pthread_t th; } holder;
+static void *hold_run(void *arg) {
+    holder *h = arg;
+    int fd = socket(AF_INET, SOCK_STREAM, 0);
+    struct sockaddr_in a = { .sin_family = AF_INET, .sin_port = htons((uint16_t)port),
+                             .sin_addr.s_addr = htonl(INADDR_LOOPBACK) };
+    if (connect(fd, (struct sockaddr *)&a, sizeof a) < 0) { close(fd); return NULL; }
+    if (write(fd, h->data, h->len) < 0) { close(fd); return NULL; }
+    char buf[512];
+    struct pollfd p = { fd, POLLIN, 0 };
+    /* the reply, then EOF once the loop closes */
+    while (poll(&p, 1, h->ms) == 1) {
+        ssize_t r = recv(fd, buf, sizeof buf, 0);
+        if (r <= 0) { h->done = 1; break; }
+    }
+    close(fd);
+    return NULL;
+}
+
+static int64_t ms_now(void) {
+    struct timespec ts;
+    clock_gettime(CLOCK_MONOTONIC, &ts);
+    return (int64_t)ts.tv_sec * 1000 + ts.tv_nsec / 1000000;
+}
+
+static const char REPLY413[] = "HTTP/1.1 413 Payload Too Large\r\nContent-Length: 0\r\nConnection: close\r\n\r\n";
 
 static gs_buf *fresh(gs_buf *b) { free(b->data); *b = (gs_buf){0}; return b; }
 
@@ -179,8 +235,60 @@ int main(void) {
     go(&c1, req, len, 0, 300);
     ev = gnet_loop_next(l, fresh(&out), &fd);
     check(ev == TOO_LARGE && files_in_dir() == 0, "multipart over max_upload is EV_TOO_LARGE");
+    hl = len - 6000;
+    check(out.len == hl && !memcmp(out.data, req, hl), "EV_TOO_LARGE hands out the head through its blank line");
     join(&c1); free(req);
     gnet_loop_free(l);
+
+    /* close_lingering: the client sends its whole refused body and still reads the reply, without a reset */
+    {
+        l = new_loop(2000);
+        uploader u = {0};
+        uint8_t *big = post(&len, "application/octet-stream", 3000000, "");
+        u.data = big; u.len = len;
+        pthread_create(&u.th, NULL, upload_run, &u);
+        ev = gnet_loop_next(l, fresh(&out), &fd);
+        check(ev == TOO_LARGE && out.len == len - 3000000, "a 3 MB body over 2000 bytes: EV_TOO_LARGE with the head");
+        check(write(fd, REPLY413, sizeof REPLY413 - 1) == (ssize_t)(sizeof REPLY413 - 1), "the reply is written");
+        gnet_loop_close_lingering(l, fd, 5000);
+        check(gnet_loop_count(l) == 1, "a lingering connection stays in the loop");
+        /* a later request unblocks next once the uploader is done; the loop reads and drops its body meanwhile */
+        go(&c2, GET, sizeof GET - 1, 0, 300);
+        int64_t t0 = ms_now();
+        ev = gnet_loop_next(l, fresh(&out), &fd);
+        check(ev == REQUEST && out.len == sizeof GET - 1, "requests are still served while one connection lingers");
+        pthread_join(u.th, NULL);
+        check(u.sent == len, "the client sent its whole body");
+        check(!u.reset, "the client saw no connection reset");
+        check(u.got >= 12 && !memcmp(u.reply, "HTTP/1.1 413", 12), "the client read the 413");
+        join(&c2);
+        (void)t0;
+        gnet_loop_free(l);
+        free(big);
+    }
+
+    /* close_lingering gives up after ms when the client never closes */
+    {
+        l = new_loop(2000);
+        uint8_t *big = post(&len, "application/octet-stream", 5000, "");
+        holder h = { .data = big, .len = len - 3000, .ms = 4000 };   /* part of the body, then silence */
+        pthread_create(&h.th, NULL, hold_run, &h);
+        ev = gnet_loop_next(l, fresh(&out), &fd);
+        check(ev == TOO_LARGE, "a partial body over the limit: EV_TOO_LARGE");
+        if (write(fd, REPLY413, sizeof REPLY413 - 1) < 0) check(0, "write the reply");
+        int64_t t0 = ms_now();
+        gnet_loop_close_lingering(l, fd, 300);
+        go(&c2, GET, sizeof GET - 1, 1600, 300);
+        ev = gnet_loop_next(l, fresh(&out), &fd);
+        check(ev == REQUEST, "a later request is served");
+        pthread_join(h.th, NULL);
+        check(h.done, "the lingering connection was closed");
+        check(ms_now() - t0 < 3500, "before the client gave up");
+        check(gnet_loop_count(l) == 1, "only the later connection is left");
+        join(&c2);
+        gnet_loop_free(l);
+        free(big);
+    }
 
     /* mixed case content-type header spools */
     l = new_loop(2000);

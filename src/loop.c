@@ -42,6 +42,7 @@ typedef struct {
     size_t hlen;                /* spooling: head bytes (through \r\n\r\n) at the start of buf */
     int64_t remain;             /* spooling: body bytes still to come */
     int failed;                 /* spooling: a write failed */
+    int64_t linger_until;       /* close_lingering: reads are dropped until then; 0 = a normal connection */
 } gnet_conn;
 
 typedef struct {
@@ -232,6 +233,24 @@ void gnet_loop_close(uint64_t h, int32_t fd) {
         if (l->conns[i].fd == fd) { drop(l, i); return; }
 }
 
+/* Answered and closing: shuts the write side now (the reply is complete), then reads and drops what the
+   client still sends until it closes, the connection idles past idle_ms, or ms pass; then closes. A client
+   still sending a body it was refused then reads the reply instead of a connection reset. */
+void gnet_loop_close_lingering(uint64_t h, int32_t fd, int64_t ms) {
+    gnet_loop *l = (gnet_loop *)(uintptr_t)h;
+    for (size_t i = 0; i < l->count; i++)
+        if (l->conns[i].fd == fd) {
+            gnet_conn *c = &l->conns[i];
+            if (ms <= 0 || l->draining) { drop(l, i); return; }
+            spool_discard(c);
+            shutdown(fd, SHUT_WR);
+            c->len = 0;
+            c->last_ms = now_ms();
+            c->linger_until = c->last_ms + ms;
+            return;
+        }
+}
+
 /* Unlike close, leaves the fd open for the caller; whatever the client sent after the
    request already handed out goes to rest. */
 void gnet_loop_detach(uint64_t h, int32_t fd, gs_rref rest) {
@@ -249,6 +268,7 @@ static int take_ready(gnet_loop *l, gs_rref out, int32_t *fd_out) {
     for (size_t k = 0; k < l->count; k++) {
         size_t i = (l->next + k) % l->count;
         gnet_conn *c = &l->conns[i];
+        if (c->linger_until) continue;
         int64_t n = c->spfd < 0 ? frame(l, c) : 0;
         if (c->spfd >= 0 && (c->failed || c->remain == 0)) {
             l->next = (i + 1) % l->count;
@@ -268,6 +288,11 @@ static int take_ready(gnet_loop *l, gs_rref out, int32_t *fd_out) {
         if (n == 0) continue;
         l->next = (i + 1) % l->count;
         *fd_out = c->fd;
+        if (n == -EV_TOO_LARGE) {
+            /* hand out the head, so the caller can answer for the route and the client */
+            const uint8_t *end = memmem(c->buf, c->len, "\r\n\r\n", 4);
+            if (end) gs_bld_append(out, c->buf, (size_t)(end - c->buf) + 4);
+        }
         if (n < 0) return (int)-n;
         gs_bld_append(out, c->buf, (size_t)n);
         memmove(c->buf, c->buf + n, c->len - (size_t)n);
@@ -302,6 +327,13 @@ static void accept_all(gnet_loop *l) {
 
 /* Reads what has arrived on c. 0 when the connection ended or failed. */
 static int fill(gnet_conn *c) {
+    if (c->linger_until) {
+        /* close_lingering: read and drop, so the client's unread body never makes the kernel answer with a reset */
+        uint8_t sink[16384];
+        ssize_t n = recv(c->fd, sink, sizeof sink, MSG_DONTWAIT);
+        if (n > 0) { c->last_ms = now_ms(); return 1; }
+        return n < 0 && (errno == EAGAIN || errno == EWOULDBLOCK || errno == EINTR);
+    }
     if (c->cap - c->len < 16384) {
         size_t cap = c->cap ? c->cap * 2 : 16384;
         while (cap - c->len < 16384) cap *= 2;
@@ -390,10 +422,10 @@ int32_t gnet_loop_next(uint64_t h, gs_rref out, int32_t *fd_out) {
         if (l->pfds[polled + 1].revents & POLLIN) start_drain(l);
         if (!l->draining && (l->pfds[0].revents & POLLIN)) accept_all(l);
 
-        if (l->idle_ms > 0) {
-            int64_t now = now_ms();
-            for (size_t i = l->count; i-- > 0;)
-                if (now - l->conns[i].last_ms > l->idle_ms) drop(l, i);
+        int64_t now = now_ms();
+        for (size_t i = l->count; i-- > 0;) {
+            gnet_conn *c = &l->conns[i];
+            if ((l->idle_ms > 0 && now - c->last_ms > l->idle_ms) || (c->linger_until && now >= c->linger_until)) drop(l, i);
         }
     }
 }

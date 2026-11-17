@@ -1,5 +1,10 @@
 # Changelog
 
+## Unreleased
+
+- New: `Event.TooLarge` hands out the request's head in `out` (the body is unread).
+- New: `lp.close_lingering(conn, ms)`: after a reply to a refused body, read and drop what the client still sends, then close, so the client reads the reply instead of a reset. `http::serve` uses it after a 413. Test: `test/spool.sh`.
+
 ## v1.4.0
 
 No code change. Tagged with gweb v1.4.0.
