@@ -121,6 +121,17 @@ static void *upload_run(void *arg) {
     return NULL;
 }
 
+
+/* Sends GET once the uploader has finished, so the loop keeps running (and draining the lingering body) until then. */
+typedef struct { uploader *u; client c; pthread_t th; } after;
+static void *after_run(void *arg) {
+    after *a = arg;
+    pthread_join(a->u->th, NULL);
+    go(&a->c, GET, sizeof GET - 1, 0, 300);
+    join(&a->c);
+    return NULL;
+}
+
 /* A client that sends data, then holds the connection without closing; done is set when the server closes it. */
 typedef struct { const uint8_t *data; size_t len; int done; int ms; pthread_t th; } holder;
 static void *hold_run(void *arg) {
@@ -257,7 +268,11 @@ int main(void) {
         int64_t t0 = ms_now();
         ev = gnet_loop_next(l, fresh(&out), &fd);
         check(ev == REQUEST && out.len == sizeof GET - 1, "requests are still served while one connection lingers");
-        pthread_join(u.th, NULL);
+        after a = { .u = &u };
+        pthread_create(&a.th, NULL, after_run, &a);
+        ev = gnet_loop_next(l, fresh(&out), &fd);
+        check(ev == REQUEST, "the loop drained the lingering body until the uploader finished");
+        pthread_join(a.th, NULL);
         check(u.sent == len, "the client sent its whole body");
         check(!u.reset, "the client saw no connection reset");
         check(u.got >= 12 && !memcmp(u.reply, "HTTP/1.1 413", 12), "the client read the 413");
