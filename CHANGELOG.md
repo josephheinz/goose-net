@@ -1,5 +1,9 @@
 # Changelog
 
+## v1.6.0
+
+No code change. Tagged with gweb v1.6.0.
+
 ## v1.5.0
 
 - New: `Event.TooLarge` hands out the request's head in `out` (the body is unread).
