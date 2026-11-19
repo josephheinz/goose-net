@@ -1,6 +1,6 @@
 # Changelog
 
-## Unreleased
+## v1.8.3
 
 - `http::reason` names the phrase of codes the enum does not list: a 429 status line reads `429 Too Many Requests`
   (not `429 Unknown`), a 410 `Gone`, a 502 `Bad Gateway`, a 504 `Gateway Timeout`, and others (see `other_reason`).
