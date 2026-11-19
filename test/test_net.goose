@@ -296,6 +296,13 @@ fn enum_tests() {
     check(http::has_body(http::Status.SwitchingProtocols) == false, "101 has no body");
     check(http::code(http::Status.PermanentRedirect) == 308, "code 308");
     check_eq(http::reason(http::Status.SeeOther), "See Other", "reason 303");
+    // A code the enum does not name still has its phrase on the status line (cms::rate_limit's 429 read "Unknown").
+    check_eq(http::reason(http::status_from_code(429)), "Too Many Requests", "reason 429");
+    check_eq(http::reason(http::status_from_code(410)), "Gone", "reason 410");
+    check_eq(http::reason(http::status_from_code(502)), "Bad Gateway", "reason 502");
+    check_eq(http::reason(http::status_from_code(504)), "Gateway Timeout", "reason 504");
+    check_eq(http::reason(http::status_from_code(418)), "Unknown", "reason of a code with no phrase");
+    check_eq(str(http::status_from_code(429)), "429 Too Many Requests", "status format 429");
     let named = [http::Status.Ok, http::Status.Accepted, http::Status.Found, http::Status.Conflict,
                  http::Status.SeeOther, http::Status.TemporaryRedirect, http::Status.PermanentRedirect,
                  http::Status.HeaderFieldsTooLarge, http::Status.ServiceUnavailable,

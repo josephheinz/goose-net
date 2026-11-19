@@ -79,7 +79,22 @@ fn reason(s: Status) -> const u8[:] {
         HeaderFieldsTooLarge => "Request Header Fields Too Large",
         InternalServerError => "Internal Server Error", NotImplemented => "Not Implemented",
         ServiceUnavailable => "Service Unavailable",
-        Other => "Unknown",
+        Other o => other_reason(o.code),
+    }
+}
+
+// The phrase of a code the enum does not name (the enum keeps its named ones for matching); "Unknown" for a code
+// with no standard phrase.
+fn other_reason(c: i64) -> const u8[:] {
+    match c {
+        100 => "Continue", 206 => "Partial Content", 207 => "Multi-Status", 300 => "Multiple Choices", 305 => "Use Proxy",
+        402 => "Payment Required", 406 => "Not Acceptable", 407 => "Proxy Authentication Required", 410 => "Gone",
+        411 => "Length Required", 412 => "Precondition Failed", 414 => "URI Too Long", 415 => "Unsupported Media Type",
+        416 => "Range Not Satisfiable", 417 => "Expectation Failed", 421 => "Misdirected Request", 423 => "Locked",
+        425 => "Too Early", 426 => "Upgrade Required", 428 => "Precondition Required", 429 => "Too Many Requests",
+        451 => "Unavailable For Legal Reasons", 502 => "Bad Gateway", 504 => "Gateway Timeout",
+        505 => "HTTP Version Not Supported", 507 => "Insufficient Storage", 511 => "Network Authentication Required",
+        _ => "Unknown",
     }
 }
 
