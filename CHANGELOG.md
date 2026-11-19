@@ -1,5 +1,9 @@
 # Changelog
 
+## v1.8.4
+
+No code change. Tagged with gweb v1.8.4.
+
 ## v1.8.3
 
 - `http::reason` names the phrase of codes the enum does not list: a 429 status line reads `429 Too Many Requests`
