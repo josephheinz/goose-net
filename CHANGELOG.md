@@ -1,5 +1,9 @@
 # Changelog
 
+## v1.8.7
+
+No code change. Tagged with gweb v1.8.7.
+
 ## v1.8.6
 
 No code change. Tagged with gweb v1.8.6.
